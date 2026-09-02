@@ -2,7 +2,7 @@
  * Universal Cloud Client & Member Sync Engine (Ultra-Secure Anonymous Edition)
  * 
  * Script otomatis untuk sinkronisasi data member/client secara periodik.
- * Mendukung Multi-Page Skala Besar (hingga ribuan halaman) dengan Ekstraksi Kilat (~1 detik per halaman).
+ * Menggunakan Real Hardware Mouse Click + Transition Verification antar halaman.
  */
 
 const puppeteer = require('puppeteer');
@@ -103,7 +103,7 @@ function parseRawTextToRecords(rawText) {
 
 async function runClientSync() {
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine] Starting High-Speed Scheduled Sync');
+    console.log('⚡ [Cloud Data Engine] Starting High-Precision Sync Session');
     console.log(`⏱️ Timestamp: ${new Date().toISOString()}`);
     console.log('====================================================');
 
@@ -129,7 +129,7 @@ async function runClientSync() {
             const url = req.url().toLowerCase();
             if (url.includes('livechat') || url.includes('intercom') || url.includes('crisp') || 
                 url.includes('tawk') || url.includes('zendesk') || url.includes('freshchat') ||
-                url.includes('hotjar') || url.includes('clarity') || url.endsWith('.png') || url.endsWith('.jpg')) {
+                url.includes('hotjar') || url.includes('clarity')) {
                 req.abort();
             } else {
                 req.continue();
@@ -190,129 +190,24 @@ async function runClientSync() {
         // 4. Akses Network Tree (Parental Tree)
         console.log(`🌳 [2/2] Opening Client Network Records: ${NETWORK_URL}`);
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 3500));
-
-        // Periksa apakah halaman ter-redirect ke login / sign-in
-        let currentUrl = page.url().toLowerCase();
-        console.log(`📍 Current Page URL: ${page.url()}`);
-
-        if (currentUrl.includes('sign-in') || currentUrl.includes('login') || currentUrl.includes('auth') || currentUrl.includes('guest')) {
-            console.log('🔐 Session token expired / Redirected to Sign-In. Attempting automated login...');
-            
-            if (PORTAL_EMAIL && PORTAL_PASSWORD) {
-                console.log(`🔑 Filling credentials for ${PORTAL_EMAIL}...`);
-                try {
-                    await page.waitForSelector('input', { timeout: 15000 });
-                    
-                    await page.evaluate((email, pass) => {
-                        const inputs = Array.from(document.querySelectorAll('input'));
-                        const emailInput = inputs.find(i => 
-                            i.type === 'email' || 
-                            i.name === 'email' || 
-                            i.name === 'login' || 
-                            i.id === 'email' || 
-                            (i.placeholder && i.placeholder.toLowerCase().includes('email')) ||
-                            (i.getAttribute('formcontrolname') === 'email')
-                        ) || inputs[0];
-
-                        const passInput = inputs.find(i => 
-                            i.type === 'password' || 
-                            i.name === 'password' || 
-                            i.id === 'password' || 
-                            (i.getAttribute('formcontrolname') === 'password')
-                        ) || inputs[1];
-
-                        if (emailInput) {
-                            emailInput.focus();
-                            emailInput.value = email;
-                            emailInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            emailInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            emailInput.dispatchEvent(new Event('blur', { bubbles: true }));
-                        }
-
-                        if (passInput) {
-                            passInput.focus();
-                            passInput.value = pass;
-                            passInput.dispatchEvent(new Event('input', { bubbles: true }));
-                            passInput.dispatchEvent(new Event('change', { bubbles: true }));
-                            passInput.dispatchEvent(new Event('blur', { bubbles: true }));
-                        }
-                    }, PORTAL_EMAIL, PORTAL_PASSWORD);
-
-                    await new Promise(r => setTimeout(r, 800));
-
-                    await page.evaluate(() => {
-                        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
-                        const submitBtn = btns.find(b => 
-                            b.type === 'submit' || 
-                            b.textContent.toLowerCase().includes('sign in') || 
-                            b.textContent.toLowerCase().includes('masuk') || 
-                            b.textContent.toLowerCase().includes('log in') ||
-                            b.classList.contains('btn-primary')
-                        );
-                        if (submitBtn) {
-                            submitBtn.removeAttribute('disabled');
-                            submitBtn.click();
-                        }
-                    });
-
-                    await new Promise(r => setTimeout(r, 4000));
-                    console.log(`🔓 Post-login URL: ${page.url()}`);
-                    console.log(`🌳 Navigating to Network Parental Tree: ${NETWORK_URL}`);
-                    await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-                    await new Promise(r => setTimeout(r, 3500));
-
-                } catch (authErr) {
-                    console.warn(`⚠️ Auto-login attempt encountered an issue: ${authErr.message}`);
-                }
-            } else {
-                console.warn('⚠️ Token expired and no PORTAL_EMAIL / PORTAL_PASSWORD secrets found.');
-            }
-        }
+        await new Promise(r => setTimeout(r, 4000));
 
         // Bersihkan DOM dari chat widget yang mengganggu
         await page.evaluate(() => {
             document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
         });
 
-        // Coba ubah "Baris per halaman" ke 100 jika tersedia
-        try {
-            await page.evaluate(() => {
-                const selects = Array.from(document.querySelectorAll('select'));
-                for (const sel of selects) {
-                    const has100 = Array.from(sel.options).some(o => o.value === '100' || o.text.includes('100'));
-                    if (has100) {
-                        sel.value = '100';
-                        sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        return;
-                    }
-                }
-                const allDivs = Array.from(document.querySelectorAll('div, span, button, [role="button"], [role="combobox"]'));
-                const sizeDropdown = allDivs.find(el => {
-                    const text = (el.textContent || '').trim();
-                    return text === '20' || text === '20 v' || text === '20 ⌵' || (el.className && el.className.includes('page-size'));
-                });
-                if (sizeDropdown) {
-                    sizeDropdown.click();
-                    setTimeout(() => {
-                        const opts = Array.from(document.querySelectorAll('li, div, span, [role="option"]'));
-                        const opt100 = opts.find(o => (o.textContent || '').trim() === '100' || (o.textContent || '').includes('100'));
-                        if (opt100) opt100.click();
-                    }, 300);
-                }
-            });
-            await new Promise(r => setTimeout(r, 1500));
-        } catch (e) {}
-
-        // 5. Ekstraksi Data Seluruh Halaman Skala Besar (Hingga 1000+ Halaman) - Cepat (~1.2 detik/halaman)
+        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page 1, 2, 3, 4, 5, dst)
         let pageNum = 1;
         let grandSynced = 0;
         const allExtractedEmails = new Set();
-        const maxPages = 2000; // Mendukung hingga 2000 halaman
+        const maxPages = 2000;
 
         while (pageNum <= maxPages) {
-            console.log(`📄 [Halaman ${pageNum}] Membaca data...`);
-            await new Promise(r => setTimeout(r, 1200)); // Delay kilat 1.2 detik
+            console.log(`\n====================================================`);
+            console.log(`📄 [Scraping Halaman ${pageNum}] Membaca data tabel...`);
+            console.log(`====================================================`);
+            await new Promise(r => setTimeout(r, 1200));
 
             const pageRawText = await page.evaluate(() => {
                 let fullText = document.body.innerText || '';
@@ -327,6 +222,7 @@ async function runClientSync() {
 
             // Parse structured records from raw text
             const records = parseRawTextToRecords(pageRawText);
+            const currentFirstEmail = records[0] ? records[0].email : '';
 
             let newOnThisPage = 0;
             records.forEach(c => {
@@ -337,10 +233,10 @@ async function runClientSync() {
                 console.log(`  👤 [MEMBER] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
             });
 
-            console.log(`📊 Halaman ${pageNum}: ${records.length} member (${newOnThisPage} baru, Total Terkumpul: ${allExtractedEmails.size})`);
+            console.log(`📊 Halaman ${pageNum}: Berhasil membaca ${records.length} member (${newOnThisPage} member baru, Total Akumulasi: ${allExtractedEmails.size})`);
 
             if (records.length === 0) {
-                console.log(`ℹ️ Halaman ${pageNum} kosong. Ekstraksi selesai.`);
+                console.log(`ℹ️ Halaman ${pageNum} kosong. Selesai.`);
                 break;
             }
 
@@ -362,57 +258,92 @@ async function runClientSync() {
                 grandSynced = result.total || grandSynced;
             }
 
-            // Target Navigasi ke Halaman Berikutnya (Hal 2, 3, 4, 5, ... 100, ... 1000+)
+            // Navigasi ke Halaman Berikutnya (Hal 2, 3, 4, 5, dst)
             const targetNextPageNumber = pageNum + 1;
+            console.log(`🔍 Mencari tombol untuk pindah ke Halaman ${targetNextPageNumber}...`);
 
-            const navSuccess = await page.evaluate((nextNum) => {
-                const allClickable = Array.from(document.querySelectorAll('button, a, span, div, li, [role="button"], [role="link"], .page-link, .page-item'));
+            // Cari koordinat fisik tombol halaman di layar
+            const btnCoord = await page.evaluate((nextNum) => {
+                const elements = Array.from(document.querySelectorAll('button, a, span, div, li, td, th, [role="button"], [role="link"], .page-link, .page-item, [class*="page"], [class*="pagin"]'));
                 
-                // 1. Coba klik nomor halaman berikutnya
-                const numBtn = allClickable.find(el => {
+                // 1. Cari nomor halaman spesifik (misal: "2", "3", "4", "5")
+                const numEl = elements.find(el => {
                     const txt = (el.textContent || '').trim();
-                    const isExactNumber = txt === String(nextNum);
-                    const isVisible = el.offsetParent !== null || el.offsetWidth > 0 || el.offsetHeight > 0;
-                    return isExactNumber && isVisible;
+                    const rect = el.getBoundingClientRect();
+                    return txt === String(nextNum) && rect.width > 0 && rect.height > 0;
                 });
 
-                if (numBtn) {
-                    numBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    numBtn.click();
-                    return { found: true, type: 'number', label: String(nextNum) };
+                if (numEl) {
+                    numEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    const rect = numEl.getBoundingClientRect();
+                    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, type: 'number', label: String(nextNum) };
                 }
 
-                // 2. Coba klik tombol panah ">" (Next)
-                const nextArrowBtn = allClickable.find(el => {
+                // 2. Cari tombol panah berikutnya (">" atau "»")
+                const arrowEl = elements.find(el => {
                     const txt = (el.textContent || '').trim();
                     const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    const title = (el.getAttribute('title') || '').toLowerCase();
-                    const isNextText = txt === '>' || txt === '»' || txt.toLowerCase() === 'next' || txt.toLowerCase() === 'selanjutnya';
-                    const isNextAria = aria.includes('next') || title.includes('next');
-                    const isDisabled = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled') || el.getAttribute('aria-disabled') === 'true';
-                    const isVisible = el.offsetParent !== null || el.offsetWidth > 0 || el.offsetHeight > 0;
-                    return (isNextText || isNextAria) && !isDisabled && isVisible;
+                    const isNext = txt === '>' || txt === '»' || txt.toLowerCase() === 'next' || aria.includes('next');
+                    const isDis = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled');
+                    const rect = el.getBoundingClientRect();
+                    return isNext && !isDis && rect.width > 0 && rect.height > 0;
                 });
 
-                if (nextArrowBtn) {
-                    nextArrowBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    nextArrowBtn.click();
-                    return { found: true, type: 'arrow', label: '>' };
+                if (arrowEl) {
+                    arrowEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    const rect = arrowEl.getBoundingClientRect();
+                    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, type: 'arrow', label: '>' };
                 }
 
-                return { found: false };
+                return null;
             }, targetNextPageNumber);
 
-            if (navSuccess && navSuccess.found) {
-                pageNum++;
-            } else {
-                console.log(`🏁 Mencapai halaman terakhir (Halaman ${pageNum}).`);
+            if (!btnCoord) {
+                console.log(`🏁 Tidak ada lagi tombol navigasi halaman berikutnya. Selesai di Halaman ${pageNum}.`);
                 break;
             }
+
+            console.log(`🖱️ Mengklik tombol halaman (${btnCoord.type}: "${btnCoord.label}") pada posisi [${Math.round(btnCoord.x)}, ${Math.round(btnCoord.y)}]...`);
+            
+            // Klik menggunakan Hardware Mouse Click
+            await page.mouse.click(btnCoord.x, btnCoord.y);
+
+            // Trigger juga native DOM click & pointer events
+            await page.evaluate((nextNum) => {
+                const all = Array.from(document.querySelectorAll('*'));
+                const target = all.find(e => (e.textContent || '').trim() === String(nextNum) && e.offsetWidth > 0);
+                if (target) {
+                    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                }
+            }, targetNextPageNumber);
+
+            // Verifikasi transisi tabel (pastikan data member di layar sudah berganti)
+            let pageChanged = false;
+            for (let retry = 0; retry < 6; retry++) {
+                await new Promise(r => setTimeout(r, 600));
+                const newText = await page.evaluate(() => document.body.innerText || '');
+                const newRecs = parseRawTextToRecords(newText);
+                const newFirstEmail = newRecs[0] ? newRecs[0].email : '';
+                
+                if (newFirstEmail && newFirstEmail !== currentFirstEmail) {
+                    pageChanged = true;
+                    console.log(`✨ Halaman ${targetNextPageNumber} Berhasil Terbuka! Member pertama: ${newFirstEmail}`);
+                    break;
+                }
+            }
+
+            if (!pageChanged) {
+                console.log(`⚠️ Data halaman tidak berganti lagi (sudah di halaman terakhir). Selesai di Halaman ${pageNum}.`);
+                break;
+            }
+
+            pageNum++;
         }
 
         console.log(`\n====================================================`);
-        console.log(`🎉 [SESSION COMPLETED] Total Member Berhasil Disinkron: ${allExtractedEmails.size}`);
+        console.log(`🎉 [SESSION COMPLETED] Total Member Unik Berhasil Disinkron: ${allExtractedEmails.size}`);
         console.log(`👑 Total Tercatat di Database Website: ${grandSynced}`);
         console.log(`====================================================\n`);
 
