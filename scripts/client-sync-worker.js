@@ -1,18 +1,15 @@
 /**
- * Universal Cloud Client & Member Sync Engine v2.3 - Wait 5s & Telegram Captcha Edition
+ * Universal Cloud Client & Member Sync Engine v3.0 - Session Caching Edition
  *
- * Alur:
- * 1. Ketik Email & Password
- * 2. Diamkan 5 detik (tanpa klik login)
- * 3. Screenshot halaman & kirim FOTO ke Telegram bro
- * 4. Tunggu balasan 4 angka dari bro di Telegram (timeout 3 menit)
- * 5. Ketik 4 angka captcha -> Klik Login -> Tarik semua data member
- * 6. Kirim laporan ke Telegram (tanpa spam email)
+ * Fitur:
+ * - Mengambil sesi aktif dari database website
+ * - Melewati form login & captcha secara otomatis jika sesi aktif
+ * - Fallback Telegram Captcha jika sesi kedaluwarsa
+ * - Menyimpan sesi baru ke database website setelah login sukses
  */
 
 const { execSync } = require('child_process');
 
-// Auto install puppeteer-extra & stealth jika belum ada
 try { require.resolve('puppeteer-extra'); } catch(e) {
     console.log('📦 Installing puppeteer-extra & stealth plugin...');
     execSync('npm install puppeteer-extra puppeteer-extra-plugin-stealth --save', { stdio: 'inherit' });
@@ -22,7 +19,6 @@ const puppeteer = require('puppeteer-extra');
 const StealthPlugin = require('puppeteer-extra-plugin-stealth');
 puppeteer.use(StealthPlugin());
 
-// Notifikasi Telegram
 const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN || '';
 const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID   || '';
 
@@ -57,7 +53,6 @@ function parseRawTextToRecords(rawText) {
     const ignoreWordsPattern = /^(active|inactive|verified|level|lots|rebates|equity|usd|idr|client|name|email)$/i;
     const records = {};
 
-    // 1. Tab / Column separated rows
     for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -88,7 +83,6 @@ function parseRawTextToRecords(rawText) {
         }
     }
 
-    // 2. Vertical line blocks
     for (let i = 0; i < lines.length; i++) {
         const email = lines[i].trim().toLowerCase();
         if (!emailPattern.test(email)) continue;
@@ -130,7 +124,7 @@ function parseRawTextToRecords(rawText) {
 async function runClientSync() {
     const startTime = new Date();
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine v2.3] Stealth Auto-Login Sync');
+    console.log('⚡ [Cloud Data Engine v3.0] Session Caching Sync');
     console.log(`⏱️  Timestamp: ${startTime.toISOString()}`);
     console.log('====================================================');
 
@@ -156,7 +150,6 @@ async function runClientSync() {
         await page.setViewport({ width: 1366, height: 768 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
 
-        // Blokir tracker & chat widget
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             const url = req.url().toLowerCase();
@@ -165,19 +158,56 @@ async function runClientSync() {
             else req.continue();
         });
 
-        // ── STEP 1: Buka halaman login ──────────────────────────────────────
-        console.log('\n🔐 [Step 1] Membuka halaman login Valetax...');
-        await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 2000));
-        const currentUrl = page.url();
+        // ── STEP 1: Coba Ambil Sesi Tersimpan dari Database ────
+        console.log('\n🔍 [Step 1] Memeriksa apakah ada sesi login tersimpan di database web...');
+        let savedSession = null;
+        try {
+            const sessRes = await fetch(`${SYNC_ENDPOINT}?action=get_session`);
+            const sessData = await sessRes.json();
+            if (sessData.status === 'success' && sessData.session) {
+                savedSession = sessData.session;
+                console.log(`💾 Ditemukan sesi login tersimpan (Terakhir diperbarui: ${savedSession.updated_at})`);
+            } else {
+                console.log('ℹ️ Belum ada sesi login tersimpan di database web.');
+            }
+        } catch(e) {
+            console.warn('⚠️ Gagal mengambil sesi tersimpan:', e.message);
+        }
+
+        if (savedSession) {
+            if (savedSession.cookies && Array.isArray(savedSession.cookies) && savedSession.cookies.length > 0) {
+                console.log(`🍪 Menyuntikkan ${savedSession.cookies.length} cookies sesi...`);
+                for (const cookie of savedSession.cookies) {
+                    try { await page.setCookie(cookie); } catch(err) {}
+                }
+            }
+            if (savedSession.fx_token) {
+                console.log('🔑 Menyuntikkan Token FX-Token ke LocalStorage...');
+                await page.evaluateOnNewDocument((token, partnerId) => {
+                    if (token) localStorage.setItem('FX-Token', token);
+                    if (partnerId) localStorage.setItem('PartnerId', partnerId);
+                }, savedSession.fx_token, savedSession.partner_id || '');
+            }
+        }
+
+        // ── STEP 2: Coba Akses Halaman Member ───────────────────────────────
+        console.log(`\n🌐 [Step 2] Mencoba membuka halaman data member: ${NETWORK_URL}`);
+        await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await new Promise(r => setTimeout(r, 4000));
+        let currentUrl = page.url();
         console.log(`📍 URL sekarang: ${currentUrl}`);
 
-        // ── STEP 2: Cek apakah sudah login langsung ─────────────────────────
-        const isAlreadyLoggedIn = currentUrl.includes('/dashboard') || currentUrl.includes('/partnership');
-        if (isAlreadyLoggedIn) {
-            console.log('✅ Sudah terdeteksi login. Skip form login.');
+        let isLoggedIn = !currentUrl.includes('/sign-in') && !currentUrl.includes('/guest') && !currentUrl.includes('/auth') && currentUrl !== LOGIN_URL;
+
+        if (isLoggedIn) {
+            console.log('\n🎉 [SESI AKTIF] Berhasil masuk langsung tanpa login & TANPA CAPTCHA! 🚀');
         } else {
-            console.log('\n📝 [Step 2] Mengisi form login Email + Password...');
+            console.log('\n🔐 Sesi belum ada atau sudah kedaluwarsa. Memulai proses Login Fresh...');
+
+            if (!currentUrl.includes('/sign-in') && !currentUrl.includes('/guest')) {
+                await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+                await new Promise(r => setTimeout(r, 2000));
+            }
 
             try {
                 await page.waitForSelector('input[type="email"], input[name="email"], input[type="text"]', { timeout: 15000 });
@@ -186,7 +216,7 @@ async function runClientSync() {
                 throw new Error(`Form login tidak ditemukan. Kemungkinan kena Cloudflare.\nISI HALAMAN: ${pageText}`);
             }
 
-            // 1. Isi Email
+            // Isi Email
             const emailSelectors = ['input[type="email"]', 'input[name="email"]', 'input[id*="email"]', 'input[placeholder*="email" i]'];
             let emailField = null;
             for (const sel of emailSelectors) {
@@ -199,7 +229,7 @@ async function runClientSync() {
             console.log(`✍️  Email diisi: ${PORTAL_EMAIL}`);
             await new Promise(r => setTimeout(r, 600));
 
-            // 2. Isi Password
+            // Isi Password
             const passSelectors = ['input[type="password"]', 'input[name="password"]', 'input[id*="password"]'];
             let passField = null;
             for (const sel of passSelectors) {
@@ -210,11 +240,10 @@ async function runClientSync() {
             await passField.type(PORTAL_PASSWORD, { delay: 90 });
             console.log('🔑 Password diisi.');
             
-            // 3. DIAMKAN 5 DETIK (Jangan klik tombol apapun!)
             console.log('⏳ Menunggu 5 detik agar form & gambar captcha termuat...');
             await new Promise(r => setTimeout(r, 5000));
 
-            // 4. Ambil Screenshot & Kirim ke Telegram
+            // Screenshot & Kirim ke Telegram
             console.log('📸 Mengambil screenshot form login & mengirim ke Telegram...');
             const screenshotBuf = await page.screenshot({ type: 'png', fullPage: false });
 
@@ -222,7 +251,7 @@ async function runClientSync() {
                 try {
                     const formData = new FormData();
                     formData.append('chat_id', TG_CHAT_ID);
-                    formData.append('caption', '📸 <b>RHFX Sync: KODE CAPTCHA DIPERLUKAN!</b>\n\nLihat gambar di atas, lalu <b>BALAS chat ini dengan 4 ANGKA</b> captchanya!\n\n⏳ <i>Robot menunggu balasan Anda selama 3 menit...</i>');
+                    formData.append('caption', '📸 <b>RHFX Sync: KODE CAPTCHA DIPERLUKAN!</b>\n\nLihat gambar di atas, lalu <b>BALAS chat ini dengan 4 ANGKA</b> captchanya!\n\n💡 <i>Sesi login akan disimpan otomatis agar sync berikutnya tidak perlu captcha lagi.</i>\n\n⏳ <i>Robot menunggu balasan Anda selama 3 menit...</i>');
                     formData.append('parse_mode', 'HTML');
                     formData.append('photo', new Blob([screenshotBuf], { type: 'image/png' }), 'captcha.png');
 
@@ -236,7 +265,6 @@ async function runClientSync() {
                     await sendTelegram('📸 <b>RHFX Sync: Butuh Kode CAPTCHA 4 Angka!</b>\n\nBuka Valetax di browser, lihat kode captchanya, lalu <b>balas pesan ini dengan 4 angka</b> tersebut!\n⏳ Robot menunggu 3 menit...');
                 }
 
-                // Ambil last update_id agar tidak membaca pesan lama
                 let lastUpdateId = 0;
                 try {
                     const initRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?limit=1&offset=-1`);
@@ -246,7 +274,6 @@ async function runClientSync() {
                     }
                 } catch(e) {}
 
-                // Polling balasan user dari Telegram (max 3 menit = 60 × 3 detik)
                 let captchaCode = null;
                 console.log('⏳ Menunggu balasan 4 angka dari Telegram bro (maks 3 menit)...');
 
@@ -278,7 +305,6 @@ async function runClientSync() {
                     throw new Error('Waktu habis (3 menit) belum ada balasan kode captcha dari Telegram! Sync dibatalkan.');
                 }
 
-                // Cari field input captcha untuk mengetikkan 4 angka
                 let captchaField = await page.$('input[name*="captcha" i], input[id*="captcha" i], input[placeholder*="captcha" i], input[placeholder*="kode" i], input[placeholder*="code" i], input[placeholder*="angka" i]');
                 if (!captchaField) {
                     const allInputs = await page.$$('input:not([type="hidden"]):not([type="password"]):not([type="email"])');
@@ -293,18 +319,16 @@ async function runClientSync() {
                     await captchaField.click({ clickCount: 3 });
                     await captchaField.type(captchaCode, { delay: 100 });
                     console.log(`✍️  Kode captcha ${captchaCode} berhasil diketikkan ke form.`);
-                } else {
-                    console.log('⚠️ Input captcha spesifik tidak ditemukan, mencoba submit langsung...');
                 }
 
-                await sendTelegram(`✅ Kode captcha <b>${captchaCode}</b> diterima! Robot sedang login & menarik data...`);
+                await sendTelegram(`✅ Kode captcha <b>${captchaCode}</b> diterima! Robot sedang login & menyimpan sesi...`);
                 await new Promise(r => setTimeout(r, 800));
 
             } else {
                 throw new Error('TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belum diset di GitHub Secrets!');
             }
 
-            // 5. Submit Form Login
+            // Submit Form Login
             let loginBtn = null;
             const loginSelectors = ['button[type="submit"]', 'input[type="submit"]', 'button:not([type])'];
             for (const sel of loginSelectors) {
@@ -331,20 +355,44 @@ async function runClientSync() {
             if (isLoginFailed) {
                 throw new Error(`Login GAGAL! URL masih di halaman login: ${afterUrl}\n\nPastikan email, password, atau captcha sudah sesuai.`);
             }
-            console.log('✅ Login berhasil! Berpindah ke halaman data member...');
+            console.log('✅ Login berhasil!');
+
+            // ── SIMPAN SESI LOGIN KE DATABASE WEB ───────────────────────────
+            try {
+                console.log('💾 Mengambil token sesi & cookies untuk disimpan ke database web...');
+                const freshCookies = await page.cookies();
+                const freshToken = await page.evaluate(() => localStorage.getItem('FX-Token') || '');
+                const freshPartnerId = await page.evaluate(() => localStorage.getItem('PartnerId') || '');
+
+                const saveRes = await fetch(`${SYNC_ENDPOINT}?action=save_session`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
+                    body: JSON.stringify({
+                        action: 'save_session',
+                        fx_token: freshToken,
+                        partner_id: freshPartnerId,
+                        cookies: freshCookies
+                    })
+                });
+                const saveResult = await saveRes.json();
+                if (saveResult.status === 'success') {
+                    console.log('🎉 Sesi login berhasil disimpan ke database web! Sync berikutnya akan berjalan otomatis tanpa captcha.');
+                }
+            } catch(saveErr) {
+                console.warn('⚠️ Gagal menyimpan sesi ke web:', saveErr.message);
+            }
+
+            console.log(`\n🌳 Membuka halaman data member: ${NETWORK_URL}`);
+            await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+            await new Promise(r => setTimeout(r, 4000));
         }
 
-        // ── STEP 3: Buka halaman Network / Parental Tree ────────────────────
-        console.log(`\n🌳 [Step 3] Membuka halaman data member: ${NETWORK_URL}`);
-        await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 4000));
-
-        // Bersihkan chat widget
+        // ── STEP 3: Bersihkan Widget & Mulai Scraping ────────────────────────
         await page.evaluate(() => {
             document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
         });
 
-        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page 1, 2, 3, 4, 5, dst)
+        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page)
         let pageNum = 1;
         let grandSynced = 0;
         const allExtractedEmails = new Set();
@@ -367,7 +415,6 @@ async function runClientSync() {
                 return fullText;
             });
 
-            // Parse structured records from raw text
             const records = parseRawTextToRecords(pageRawText);
             const currentFirstEmail = records[0] ? records[0].email : '';
 
@@ -387,7 +434,6 @@ async function runClientSync() {
                 break;
             }
 
-            // Kirim data halaman ini ke database website backend
             const response = await fetch(SYNC_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
@@ -396,7 +442,7 @@ async function runClientSync() {
                     raw_text: pageRawText, 
                     preview: false, 
                     sync_key: SYNC_KEY, 
-                    source: 'cloud_engine_v2' 
+                    source: 'cloud_engine_v3' 
                 })
             });
 
@@ -405,11 +451,9 @@ async function runClientSync() {
                 grandSynced = result.total || grandSynced;
             }
 
-            // Navigasi ke Halaman Berikutnya (Hal 2, 3, 4, 5, dst)
             const targetNextPageNumber = pageNum + 1;
             console.log(`🔍 Mencari tombol untuk pindah ke Halaman ${targetNextPageNumber}...`);
 
-            // Cari koordinat fisik tombol halaman di layar
             const btnCoord = await page.evaluate((nextNum) => {
                 const elements = Array.from(document.querySelectorAll('button, a, span, div, li, td, th, [role="button"], [role="link"], .page-link, .page-item, [class*="page"], [class*="pagin"]'));
                 
@@ -462,7 +506,6 @@ async function runClientSync() {
                 }
             }, targetNextPageNumber);
 
-            // Verifikasi transisi tabel (pastikan data member di layar sudah berganti)
             let pageChanged = false;
             for (let retry = 0; retry < 6; retry++) {
                 await new Promise(r => setTimeout(r, 600));
