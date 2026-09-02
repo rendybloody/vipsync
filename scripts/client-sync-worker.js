@@ -2,7 +2,7 @@
  * Universal Cloud Client & Member Sync Engine (Ultra-Secure Anonymous Edition)
  * 
  * Script otomatis untuk sinkronisasi data member/client secara periodik.
- * Semua URL, Kunci Akses, dan Domain disimpan aman di Secrets.
+ * Mendukung Token Session + Auto-Login Email/Password Fallback + Multi-Page Pagination (100 per page).
  */
 
 const puppeteer = require('puppeteer');
@@ -14,6 +14,9 @@ const CF_CLEARANCE = process.env.PORTAL_CLEARANCE || '';
 const FX_TOKEN = process.env.PORTAL_FX_TOKEN || '';
 const PARTNER_ID = process.env.PORTAL_PARTNER_ID || '';
 const ANALYTICS_ID = process.env.PORTAL_ANALYTICS_ID || '';
+
+const PORTAL_EMAIL = process.env.PORTAL_EMAIL || process.env.VALETAX_EMAIL || '';
+const PORTAL_PASSWORD = process.env.PORTAL_PASSWORD || process.env.VALETAX_PASSWORD || '';
 
 // Target Sync Endpoint
 const SYNC_ENDPOINT = process.env.TARGET_SYNC_URL || 'https://vip.rhfxtrade.web.id/api/valetax_sync.php';
@@ -41,7 +44,7 @@ async function runClientSync() {
         await page.setViewport({ width: 1920, height: 1080 });
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
 
-        // Blokir popup & tracker
+        // Blokir popup & tracker yang memperlambat rendering
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             const url = req.url().toLowerCase();
@@ -77,6 +80,17 @@ async function runClientSync() {
             });
         }
 
+        if (FX_TOKEN) {
+            await page.setCookie({
+                name: 'FX-Token',
+                value: FX_TOKEN,
+                domain: 'ma.valetax-indonesia.com',
+                path: '/',
+                secure: true,
+                httpOnly: false
+            });
+        }
+
         // 2. Suntikkan LocalStorage Token
         await page.evaluateOnNewDocument((token, partnerId, analyticsId) => {
             if (token) localStorage.setItem('FX-Token', token);
@@ -94,44 +108,99 @@ async function runClientSync() {
             if (analyticsId) localStorage.setItem('analytics_user_id', analyticsId);
         }, FX_TOKEN, ANALYTICS_ID);
 
-        // 4. Akses Network Tree
-        console.log(`🌳 [2/2] Opening Client Network Records...`);
+        // 4. Akses Network Tree (Parental Tree)
+        console.log(`🌳 [2/2] Opening Client Network Records: ${NETWORK_URL}`);
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
         await new Promise(r => setTimeout(r, 6000));
 
-        // Periksa apakah halaman ter-redirect ke login
-        const currentUrl = page.url();
-        console.log(`📍 Current Page URL: ${currentUrl}`);
-        if (currentUrl.includes('/login') || currentUrl.includes('/auth')) {
-            console.warn('⚠️ Warning: Partner portal redirected to login page. Please verify PORTAL_FX_TOKEN / PORTAL_CLEARANCE secrets.');
+        // Periksa apakah halaman ter-redirect ke login / sign-in
+        let currentUrl = page.url().toLowerCase();
+        console.log(`📍 Current Page URL: ${page.url()}`);
+
+        if (currentUrl.includes('sign-in') || currentUrl.includes('login') || currentUrl.includes('auth')) {
+            console.log('🔐 Redirected to Sign-In. Attempting automated login with credentials...');
+            
+            if (PORTAL_EMAIL && PORTAL_PASSWORD) {
+                console.log(`🔑 Logging in as ${PORTAL_EMAIL}...`);
+                try {
+                    const emailInput = await page.$('input[type="email"], input[name="email"], input[name="login"], input[placeholder*="email" i], input[type="text"]');
+                    if (emailInput) {
+                        await emailInput.click({ clickCount: 3 });
+                        await emailInput.type(PORTAL_EMAIL, { delay: 40 });
+                    }
+
+                    const passInput = await page.$('input[type="password"], input[name="password"]');
+                    if (passInput) {
+                        await passInput.click({ clickCount: 3 });
+                        await passInput.type(PORTAL_PASSWORD, { delay: 40 });
+                    }
+
+                    const submitBtn = await page.$('button[type="submit"], button.btn-primary, button');
+                    if (submitBtn) {
+                        await Promise.all([
+                            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
+                            submitBtn.click()
+                        ]);
+                        await new Promise(r => setTimeout(r, 5000));
+                    }
+
+                    console.log(`🔓 Post-login URL: ${page.url()}`);
+                    console.log(`🌳 Re-navigating to Network Parental Tree: ${NETWORK_URL}`);
+                    await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+                    await new Promise(r => setTimeout(r, 6000));
+                } catch (authErr) {
+                    console.warn(`⚠️ Auto-login attempt encountered an issue: ${authErr.message}`);
+                }
+            } else {
+                console.warn('⚠️ Token expired and no PORTAL_EMAIL / PORTAL_PASSWORD secrets found.');
+            }
         }
 
-        // Bersihkan DOM
+        // Bersihkan DOM dari chat widget yang mengganggu
         await page.evaluate(() => {
             document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
         });
 
-        // Set pagination ke 100 jika ada selector
+        // Set pagination ke 100 client per halaman
+        console.log('⚙️ Setting table pagination to 100 rows per page...');
         try {
             await page.evaluate(() => {
+                // Native select
                 const selects = Array.from(document.querySelectorAll('select'));
                 for (const sel of selects) {
                     const has100 = Array.from(sel.options).some(o => o.value === '100' || o.text.includes('100'));
                     if (has100) {
                         sel.value = '100';
                         sel.dispatchEvent(new Event('change', { bubbles: true }));
-                        break;
+                        return;
+                    }
+                }
+                // Custom UI dropdown (PrimeNG / Angular / Material / React)
+                const dropdowns = Array.from(document.querySelectorAll('.p-dropdown, .dropdown, [class*="select"], [role="combobox"], [class*="page-size"]'));
+                for (const dd of dropdowns) {
+                    if (dd.textContent.includes('10') || dd.textContent.includes('20') || dd.textContent.includes('25') || dd.textContent.includes('50') || dd.textContent.includes('100')) {
+                        dd.click();
+                        setTimeout(() => {
+                            const opts = Array.from(document.querySelectorAll('.p-dropdown-item, .dropdown-item, [role="option"], li'));
+                            const opt100 = opts.find(o => o.textContent.trim() === '100' || o.textContent.includes('100'));
+                            if (opt100) opt100.click();
+                        }, 500);
+                        return;
                     }
                 }
             });
-            await new Promise(r => setTimeout(r, 3000));
+            await new Promise(r => setTimeout(r, 4000));
         } catch (e) {}
 
-        // 5. Ekstraksi Data Presisi (Structured Table DOM + Raw Fallback)
+        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page)
         let pageNum = 1;
         let grandSynced = 0;
+        const allExtractedClients = [];
 
         while (true) {
+            console.log(`\n📄 [Processing Page ${pageNum}] Scraping table data...`);
+            await new Promise(r => setTimeout(r, 3000));
+
             const pageData = await page.evaluate(() => {
                 let fullText = document.body.innerText || '';
                 document.querySelectorAll('iframe').forEach(f => {
@@ -141,7 +210,7 @@ async function runClientSync() {
                     } catch (err) {}
                 });
 
-                // Structured extraction from table rows
+                // Structured extraction directly from HTML table rows
                 const rows = Array.from(document.querySelectorAll('table tbody tr, tr, [role="row"]'));
                 const records = [];
                 const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
@@ -193,17 +262,21 @@ async function runClientSync() {
             const rawText = pageData.rawText || '';
             const records = pageData.records || [];
 
-            console.log(`📄 Page ${pageNum}: ${rawText.length} characters, ${records.length} structured rows found`);
+            console.log(`📊 Page ${pageNum}: Found ${records.length} structured client rows`);
 
-            // Log first few clients for instant verification
-            if (records.length > 0) {
-                records.slice(0, 5).forEach(c => {
-                    console.log(`  👤 [CLIENT] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
-                });
+            // Print each client found for transparent logs
+            records.forEach(c => {
+                allExtractedClients.push(c);
+                console.log(`  👤 [CLIENT] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
+            });
+
+            if (!rawText || rawText.trim().length === 0 || records.length === 0) {
+                console.log(`ℹ️ Page ${pageNum} contains no more client records.`);
+                break;
             }
 
-            if (!rawText || rawText.trim().length === 0) break;
-
+            // Kirim ke backend sync endpoint
+            console.log(`🚀 Sending Page ${pageNum} data to Website Database (${SYNC_ENDPOINT})...`);
             const response = await fetch(SYNC_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
@@ -218,20 +291,41 @@ async function runClientSync() {
 
             const result = await response.json();
             if (result.status === 'success') {
-                console.log(`✅ Page ${pageNum} Synced successfully: ${result.total || 0} clients, Eligible: ${result.eligible || 0}`);
+                console.log(`✅ Page ${pageNum} Synced successfully: ${result.total || 0} clients saved, Eligible (≥$5): ${result.eligible || 0}`);
                 grandSynced = result.total || grandSynced;
             } else {
                 console.warn(`⚠️ Endpoint Response: ${result.message}`);
             }
 
+            // Periksa apakah ada halaman berikutnya (Next Page)
             const hasNextPage = await page.evaluate(() => {
-                const nextButtons = Array.from(document.querySelectorAll('button, a, .page-link, .pagination a'));
-                const nextBtn = nextButtons.find(el => {
+                const selectors = [
+                    'button[aria-label*="Next" i]',
+                    'a[aria-label*="Next" i]',
+                    '.p-paginator-next:not(.p-disabled)',
+                    '.pagination-next:not(.disabled) a',
+                    '.pagination .next:not(.disabled) a',
+                    'button.next:not([disabled])',
+                    'a.next:not(.disabled)',
+                    'li.next:not(.disabled) a',
+                    '.page-item:not(.disabled) a[aria-label*="next" i]'
+                ];
+                for (const s of selectors) {
+                    const el = document.querySelector(s);
+                    if (el && !el.disabled && !el.classList.contains('disabled') && !el.classList.contains('p-disabled')) {
+                        el.click();
+                        return true;
+                    }
+                }
+                const buttons = Array.from(document.querySelectorAll('button, a, .page-link, [role="button"]'));
+                const nextBtn = buttons.find(el => {
                     const text = (el.textContent || '').trim().toLowerCase();
                     const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    return text === 'next' || text === '>' || text === '>>' || aria.includes('next');
+                    const isNext = text === 'next' || text === '>' || text === '»' || text === 'selanjutnya' || aria.includes('next');
+                    const isDisabled = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled') || el.getAttribute('aria-disabled') === 'true';
+                    return isNext && !isDisabled;
                 });
-                if (nextBtn && !nextBtn.disabled && !nextBtn.classList.contains('disabled')) {
+                if (nextBtn) {
                     nextBtn.click();
                     return true;
                 }
@@ -240,16 +334,19 @@ async function runClientSync() {
 
             if (hasNextPage) {
                 pageNum++;
-                await new Promise(r => setTimeout(r, 4000));
+                console.log(`⏭️ Moving to Next Page (${pageNum})...`);
+                await new Promise(r => setTimeout(r, 5000));
             } else {
+                console.log(`🏁 Reached last page of client records.`);
                 break;
             }
 
             if (pageNum > 20) break;
         }
 
-        console.log(`====================================================`);
-        console.log(`🎉 [SESSION COMPLETED] Total Clients Registered: ${grandSynced}`);
+        console.log(`\n====================================================`);
+        console.log(`🎉 [SESSION COMPLETED] Total Clients Extracted: ${allExtractedClients.length}`);
+        console.log(`👑 Total Registered in Database: ${grandSynced}`);
         console.log(`====================================================\n`);
 
     } catch (error) {
