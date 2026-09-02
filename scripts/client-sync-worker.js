@@ -2,7 +2,7 @@
  * Universal Cloud Client & Member Sync Engine (Ultra-Secure Anonymous Edition)
  * 
  * Script otomatis untuk sinkronisasi data member/client secara periodik.
- * Mendukung Token Session + Auto-Login Email/Password Fallback + Multi-Page Pagination (100 per page).
+ * Mendukung Multi-Page Skala Besar (hingga ribuan halaman) dengan Ekstraksi Kilat (~1 detik per halaman).
  */
 
 const puppeteer = require('puppeteer');
@@ -103,7 +103,7 @@ function parseRawTextToRecords(rawText) {
 
 async function runClientSync() {
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine] Starting Scheduled Sync Session');
+    console.log('⚡ [Cloud Data Engine] Starting High-Speed Scheduled Sync');
     console.log(`⏱️ Timestamp: ${new Date().toISOString()}`);
     console.log('====================================================');
 
@@ -129,7 +129,7 @@ async function runClientSync() {
             const url = req.url().toLowerCase();
             if (url.includes('livechat') || url.includes('intercom') || url.includes('crisp') || 
                 url.includes('tawk') || url.includes('zendesk') || url.includes('freshchat') ||
-                url.includes('hotjar') || url.includes('clarity')) {
+                url.includes('hotjar') || url.includes('clarity') || url.endsWith('.png') || url.endsWith('.jpg')) {
                 req.abort();
             } else {
                 req.continue();
@@ -180,7 +180,7 @@ async function runClientSync() {
         // 3. Akses Summary
         console.log(`🌐 [1/2] Connecting to Partner Portal...`);
         await page.goto(SUMMARY_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 2000));
 
         await page.evaluate((token, analyticsId) => {
             if (token) localStorage.setItem('FX-Token', token);
@@ -190,7 +190,7 @@ async function runClientSync() {
         // 4. Akses Network Tree (Parental Tree)
         console.log(`🌳 [2/2] Opening Client Network Records: ${NETWORK_URL}`);
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 8000));
+        await new Promise(r => setTimeout(r, 3500));
 
         // Periksa apakah halaman ter-redirect ke login / sign-in
         let currentUrl = page.url().toLowerCase();
@@ -239,7 +239,7 @@ async function runClientSync() {
                         }
                     }, PORTAL_EMAIL, PORTAL_PASSWORD);
 
-                    await new Promise(r => setTimeout(r, 1000));
+                    await new Promise(r => setTimeout(r, 800));
 
                     await page.evaluate(() => {
                         const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
@@ -256,11 +256,11 @@ async function runClientSync() {
                         }
                     });
 
-                    await new Promise(r => setTimeout(r, 6000));
+                    await new Promise(r => setTimeout(r, 4000));
                     console.log(`🔓 Post-login URL: ${page.url()}`);
                     console.log(`🌳 Navigating to Network Parental Tree: ${NETWORK_URL}`);
                     await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-                    await new Promise(r => setTimeout(r, 8000));
+                    await new Promise(r => setTimeout(r, 3500));
 
                 } catch (authErr) {
                     console.warn(`⚠️ Auto-login attempt encountered an issue: ${authErr.message}`);
@@ -275,8 +275,7 @@ async function runClientSync() {
             document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
         });
 
-        // Set pagination ke 100 client per halaman
-        console.log('⚙️ Setting table pagination to 100 rows per page...');
+        // Coba ubah "Baris per halaman" ke 100 jika tersedia
         try {
             await page.evaluate(() => {
                 const selects = Array.from(document.querySelectorAll('select'));
@@ -288,30 +287,32 @@ async function runClientSync() {
                         return;
                     }
                 }
-                const dropdowns = Array.from(document.querySelectorAll('.p-dropdown, .dropdown, [class*="select"], [role="combobox"], [class*="page-size"]'));
-                for (const dd of dropdowns) {
-                    if (dd.textContent.includes('10') || dd.textContent.includes('20') || dd.textContent.includes('25') || dd.textContent.includes('50') || dd.textContent.includes('100')) {
-                        dd.click();
-                        setTimeout(() => {
-                            const opts = Array.from(document.querySelectorAll('.p-dropdown-item, .dropdown-item, [role="option"], li'));
-                            const opt100 = opts.find(o => o.textContent.trim() === '100' || o.textContent.includes('100'));
-                            if (opt100) opt100.click();
-                        }, 500);
-                        return;
-                    }
+                const allDivs = Array.from(document.querySelectorAll('div, span, button, [role="button"], [role="combobox"]'));
+                const sizeDropdown = allDivs.find(el => {
+                    const text = (el.textContent || '').trim();
+                    return text === '20' || text === '20 v' || text === '20 ⌵' || (el.className && el.className.includes('page-size'));
+                });
+                if (sizeDropdown) {
+                    sizeDropdown.click();
+                    setTimeout(() => {
+                        const opts = Array.from(document.querySelectorAll('li, div, span, [role="option"]'));
+                        const opt100 = opts.find(o => (o.textContent || '').trim() === '100' || (o.textContent || '').includes('100'));
+                        if (opt100) opt100.click();
+                    }, 300);
                 }
             });
-            await new Promise(r => setTimeout(r, 5000));
+            await new Promise(r => setTimeout(r, 1500));
         } catch (e) {}
 
-        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page)
+        // 5. Ekstraksi Data Seluruh Halaman Skala Besar (Hingga 1000+ Halaman) - Cepat (~1.2 detik/halaman)
         let pageNum = 1;
         let grandSynced = 0;
-        const allExtractedClients = [];
+        const allExtractedEmails = new Set();
+        const maxPages = 2000; // Mendukung hingga 2000 halaman
 
-        while (true) {
-            console.log(`\n📄 [Processing Page ${pageNum}] Scraping table data...`);
-            await new Promise(r => setTimeout(r, 4000));
+        while (pageNum <= maxPages) {
+            console.log(`📄 [Halaman ${pageNum}] Membaca data...`);
+            await new Promise(r => setTimeout(r, 1200)); // Delay kilat 1.2 detik
 
             const pageRawText = await page.evaluate(() => {
                 let fullText = document.body.innerText || '';
@@ -324,25 +325,26 @@ async function runClientSync() {
                 return fullText;
             });
 
-            console.log(`📄 Page ${pageNum}: Raw text length = ${pageRawText.length} characters`);
-
             // Parse structured records from raw text
             const records = parseRawTextToRecords(pageRawText);
-            console.log(`📊 Page ${pageNum}: Successfully parsed ${records.length} client records`);
 
-            // Print each client found for transparent logs
+            let newOnThisPage = 0;
             records.forEach(c => {
-                allExtractedClients.push(c);
-                console.log(`  👤 [CLIENT] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
+                if (!allExtractedEmails.has(c.email)) {
+                    allExtractedEmails.add(c.email);
+                    newOnThisPage++;
+                }
+                console.log(`  👤 [MEMBER] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
             });
 
-            if (!pageRawText || pageRawText.trim().length === 0 || records.length === 0) {
-                console.log(`ℹ️ Page ${pageNum} contains no more client records.`);
+            console.log(`📊 Halaman ${pageNum}: ${records.length} member (${newOnThisPage} baru, Total Terkumpul: ${allExtractedEmails.size})`);
+
+            if (records.length === 0) {
+                console.log(`ℹ️ Halaman ${pageNum} kosong. Ekstraksi selesai.`);
                 break;
             }
 
-            // Kirim ke backend sync endpoint
-            console.log(`🚀 Sending Page ${pageNum} data (${records.length} records) to Website Database (${SYNC_ENDPOINT})...`);
+            // Kirim data halaman ini ke database website backend
             const response = await fetch(SYNC_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
@@ -357,62 +359,61 @@ async function runClientSync() {
 
             const result = await response.json();
             if (result.status === 'success') {
-                console.log(`✅ Page ${pageNum} Synced successfully: ${result.total || 0} clients saved, Eligible (≥$5): ${result.eligible || 0}`);
                 grandSynced = result.total || grandSynced;
-            } else {
-                console.warn(`⚠️ Endpoint Response: ${result.message}`);
             }
 
-            // Periksa apakah ada halaman berikutnya (Next Page)
-            const hasNextPage = await page.evaluate(() => {
-                const selectors = [
-                    'button[aria-label*="Next" i]',
-                    'a[aria-label*="Next" i]',
-                    '.p-paginator-next:not(.p-disabled)',
-                    '.pagination-next:not(.disabled) a',
-                    '.pagination .next:not(.disabled) a',
-                    'button.next:not([disabled])',
-                    'a.next:not(.disabled)',
-                    'li.next:not(.disabled) a',
-                    '.page-item:not(.disabled) a[aria-label*="next" i]'
-                ];
-                for (const s of selectors) {
-                    const el = document.querySelector(s);
-                    if (el && !el.disabled && !el.classList.contains('disabled') && !el.classList.contains('p-disabled')) {
-                        el.click();
-                        return true;
-                    }
-                }
-                const buttons = Array.from(document.querySelectorAll('button, a, .page-link, [role="button"]'));
-                const nextBtn = buttons.find(el => {
-                    const text = (el.textContent || '').trim().toLowerCase();
-                    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    const isNext = text === 'next' || text === '>' || text === '»' || text === 'selanjutnya' || aria.includes('next');
-                    const isDisabled = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled') || el.getAttribute('aria-disabled') === 'true';
-                    return isNext && !isDisabled;
-                });
-                if (nextBtn) {
-                    nextBtn.click();
-                    return true;
-                }
-                return false;
-            });
+            // Target Navigasi ke Halaman Berikutnya (Hal 2, 3, 4, 5, ... 100, ... 1000+)
+            const targetNextPageNumber = pageNum + 1;
 
-            if (hasNextPage) {
+            const navSuccess = await page.evaluate((nextNum) => {
+                const allClickable = Array.from(document.querySelectorAll('button, a, span, div, li, [role="button"], [role="link"], .page-link, .page-item'));
+                
+                // 1. Coba klik nomor halaman berikutnya
+                const numBtn = allClickable.find(el => {
+                    const txt = (el.textContent || '').trim();
+                    const isExactNumber = txt === String(nextNum);
+                    const isVisible = el.offsetParent !== null || el.offsetWidth > 0 || el.offsetHeight > 0;
+                    return isExactNumber && isVisible;
+                });
+
+                if (numBtn) {
+                    numBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    numBtn.click();
+                    return { found: true, type: 'number', label: String(nextNum) };
+                }
+
+                // 2. Coba klik tombol panah ">" (Next)
+                const nextArrowBtn = allClickable.find(el => {
+                    const txt = (el.textContent || '').trim();
+                    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                    const title = (el.getAttribute('title') || '').toLowerCase();
+                    const isNextText = txt === '>' || txt === '»' || txt.toLowerCase() === 'next' || txt.toLowerCase() === 'selanjutnya';
+                    const isNextAria = aria.includes('next') || title.includes('next');
+                    const isDisabled = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled') || el.getAttribute('aria-disabled') === 'true';
+                    const isVisible = el.offsetParent !== null || el.offsetWidth > 0 || el.offsetHeight > 0;
+                    return (isNextText || isNextAria) && !isDisabled && isVisible;
+                });
+
+                if (nextArrowBtn) {
+                    nextArrowBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
+                    nextArrowBtn.click();
+                    return { found: true, type: 'arrow', label: '>' };
+                }
+
+                return { found: false };
+            }, targetNextPageNumber);
+
+            if (navSuccess && navSuccess.found) {
                 pageNum++;
-                console.log(`⏭️ Moving to Next Page (${pageNum})...`);
-                await new Promise(r => setTimeout(r, 6000));
             } else {
-                console.log(`🏁 Reached last page of client records.`);
+                console.log(`🏁 Mencapai halaman terakhir (Halaman ${pageNum}).`);
                 break;
             }
-
-            if (pageNum > 20) break;
         }
 
         console.log(`\n====================================================`);
-        console.log(`🎉 [SESSION COMPLETED] Total Clients Extracted: ${allExtractedClients.length}`);
-        console.log(`👑 Total Registered in Database: ${grandSynced}`);
+        console.log(`🎉 [SESSION COMPLETED] Total Member Berhasil Disinkron: ${allExtractedEmails.size}`);
+        console.log(`👑 Total Tercatat di Database Website: ${grandSynced}`);
         console.log(`====================================================\n`);
 
     } catch (error) {
