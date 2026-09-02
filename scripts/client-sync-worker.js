@@ -1,11 +1,10 @@
 /**
- * Universal Cloud Client & Member Sync Engine v3.0 - Session Caching Edition
+ * Universal Cloud Client & Member Sync Engine v3.1 - Detailed VIP Member List Report
  *
  * Fitur:
- * - Mengambil sesi aktif dari database website
- * - Melewati form login & captcha secara otomatis jika sesi aktif
- * - Fallback Telegram Captcha jika sesi kedaluwarsa
- * - Menyimpan sesi baru ke database website setelah login sukses
+ * - Session Caching (Bebas captcha jika sesi aktif)
+ * - Laporan Telegram lengkap dengan daftar member lolos VIP & nominal equity
+ * - Urutan member berdasarkan equity terbesar
  */
 
 const { execSync } = require('child_process');
@@ -124,7 +123,7 @@ function parseRawTextToRecords(rawText) {
 async function runClientSync() {
     const startTime = new Date();
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine v3.0] Session Caching Sync');
+    console.log('⚡ [Cloud Data Engine v3.1] Session Caching Sync');
     console.log(`⏱️  Timestamp: ${startTime.toISOString()}`);
     console.log('====================================================');
 
@@ -395,7 +394,7 @@ async function runClientSync() {
         // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page)
         let pageNum = 1;
         let grandSynced = 0;
-        const allExtractedEmails = new Set();
+        const allExtractedRecords = new Map();
         const maxPages = 2000;
 
         while (pageNum <= maxPages) {
@@ -420,14 +419,15 @@ async function runClientSync() {
 
             let newOnThisPage = 0;
             records.forEach(c => {
-                if (!allExtractedEmails.has(c.email)) {
-                    allExtractedEmails.add(c.email);
+                const key = (c.email || '').toLowerCase().trim();
+                if (key && !allExtractedRecords.has(key)) {
+                    allExtractedRecords.set(key, c);
                     newOnThisPage++;
                 }
                 console.log(`  👤 [MEMBER] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
             });
 
-            console.log(`📊 Halaman ${pageNum}: Berhasil membaca ${records.length} member (${newOnThisPage} member baru, Total Akumulasi: ${allExtractedEmails.size})`);
+            console.log(`📊 Halaman ${pageNum}: Berhasil membaca ${records.length} member (${newOnThisPage} member baru, Total Akumulasi: ${allExtractedRecords.size})`);
 
             if (records.length === 0) {
                 console.log(`ℹ️ Halaman ${pageNum} kosong. Selesai.`);
@@ -531,18 +531,40 @@ async function runClientSync() {
         const endTime = new Date();
         const durationSec = Math.round((endTime - startTime) / 1000);
 
+        const allMembers = Array.from(allExtractedRecords.values());
+        const eligibleMembers = allMembers.filter(m => (m.equity || 0) >= 5);
+        const lowEquityMembers = allMembers.filter(m => (m.equity || 0) < 5);
+
+        eligibleMembers.sort((a, b) => (b.equity || 0) - (a.equity || 0));
+
         console.log(`\n====================================================`);
-        console.log(`🎉 [SELESAI] Member Unik Disinkron: ${allExtractedEmails.size}`);
-        console.log(`👑 Total di Database: ${grandSynced}`);
+        console.log(`🎉 [SELESAI] Total Member Disinkron: ${allMembers.length}`);
+        console.log(`✨ Member Lolos VIP (Equity ≥ $5): ${eligibleMembers.length}`);
+        console.log(`⏳ Member Belum Memenuhi (< $5): ${lowEquityMembers.length}`);
+        console.log(`👑 Total Tercatat di Database: ${grandSynced}`);
         console.log(`⏱️  Durasi: ${durationSec} detik`);
         console.log(`====================================================\n`);
 
-        if (allExtractedEmails.size > 0) {
+        let eligibleListText = '';
+        if (eligibleMembers.length > 0) {
+            eligibleListText = '\n\n💎 <b>Daftar Member Lolos VIP (Equity ≥ $5):</b>\n' +
+                eligibleMembers.map((m, idx) => {
+                    const nameStr = m.full_name ? ` (${m.full_name})` : '';
+                    return `${idx + 1}. <code>${m.email}</code>${nameStr} — <b>$${m.equity}</b>`;
+                }).join('\n');
+        } else {
+            eligibleListText = '\n\n⚠️ <i>Belum ada member dengan equity ≥ $5.</i>';
+        }
+
+        if (allMembers.length > 0) {
             await sendTelegram(
                 `✅ <b>RHFX Sync SUKSES</b>\n\n` +
-                `👥 Member berhasil disinkron: <b>${allExtractedEmails.size}</b>\n` +
-                `🗄️ Total di database: <b>${grandSynced}</b>\n` +
-                `⏱️ Durasi: ${durationSec} detik\n` +
+                `👥 Total Client: <b>${allMembers.length}</b>\n` +
+                `✨ Lolos VIP (Equity ≥ $5): <b>${eligibleMembers.length} Member</b>\n` +
+                `⏳ Belum Memenuhi (&lt; $5): <b>${lowEquityMembers.length} Member</b>\n` +
+                `🗄️ Total di Database: <b>${grandSynced}</b>\n` +
+                `⏱️ Durasi: <b>${durationSec} detik</b>` +
+                eligibleListText + '\n\n' +
                 `🕐 ${endTime.toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB`
             );
         } else {
