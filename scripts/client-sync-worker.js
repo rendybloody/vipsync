@@ -15,6 +15,7 @@ const FX_TOKEN = process.env.PORTAL_FX_TOKEN || '';
 const PARTNER_ID = process.env.PORTAL_PARTNER_ID || '';
 const ANALYTICS_ID = process.env.PORTAL_ANALYTICS_ID || '';
 
+// Target Sync Endpoint
 const SYNC_ENDPOINT = process.env.TARGET_SYNC_URL || 'https://vip.rhfxtrade.web.id/api/valetax_sync.php';
 const SYNC_KEY = process.env.TARGET_SYNC_KEY || '';
 
@@ -98,12 +99,19 @@ async function runClientSync() {
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
         await new Promise(r => setTimeout(r, 6000));
 
+        // Periksa apakah halaman ter-redirect ke login
+        const currentUrl = page.url();
+        console.log(`📍 Current Page URL: ${currentUrl}`);
+        if (currentUrl.includes('/login') || currentUrl.includes('/auth')) {
+            console.warn('⚠️ Warning: Partner portal redirected to login page. Please verify PORTAL_FX_TOKEN / PORTAL_CLEARANCE secrets.');
+        }
+
         // Bersihkan DOM
         await page.evaluate(() => {
             document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
         });
 
-        // Set pagination ke 100
+        // Set pagination ke 100 jika ada selector
         try {
             await page.evaluate(() => {
                 const selects = Array.from(document.querySelectorAll('select'));
@@ -119,12 +127,12 @@ async function runClientSync() {
             await new Promise(r => setTimeout(r, 3000));
         } catch (e) {}
 
-        // 5. Ekstraksi Data
+        // 5. Ekstraksi Data Presisi (Structured Table DOM + Raw Fallback)
         let pageNum = 1;
         let grandSynced = 0;
 
         while (true) {
-            const pageRawText = await page.evaluate(() => {
+            const pageData = await page.evaluate(() => {
                 let fullText = document.body.innerText || '';
                 document.querySelectorAll('iframe').forEach(f => {
                     try {
@@ -132,18 +140,76 @@ async function runClientSync() {
                         if (doc && doc.body) fullText += '\n' + doc.body.innerText;
                     } catch (err) {}
                 });
-                return fullText;
+
+                // Structured extraction from table rows
+                const rows = Array.from(document.querySelectorAll('table tbody tr, tr, [role="row"]'));
+                const records = [];
+                const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
+                const numberRegex = /^-?\d+(?:\.\d+)?$/;
+                const structureRegex = /^\d+(?:\s*\|\s*\d+){1,}$/;
+                const ignoreWordsRegex = /^(active|inactive|verified|level|lots|rebates|equity|usd|idr|client|name|email)$/i;
+
+                for (const row of rows) {
+                    const text = (row.innerText || '').trim();
+                    const emailMatch = text.match(emailRegex);
+                    if (!emailMatch) continue;
+
+                    const email = emailMatch[0].toLowerCase();
+                    const parts = text.split(/\t+|\n+|\s{2,}/).map(p => p.trim()).filter(Boolean);
+
+                    const numbers = [];
+                    let name = '';
+                    let structure = '';
+
+                    for (const p of parts) {
+                        if (p.toLowerCase() === email) continue;
+                        if (structureRegex.test(p)) {
+                            structure = p;
+                        } else if (numberRegex.test(p)) {
+                            numbers.push(parseFloat(p));
+                        } else if (!name && !ignoreWordsRegex.test(p)) {
+                            name = p;
+                        }
+                    }
+
+                    if (numbers.length >= 1) {
+                        records.push({
+                            email: email,
+                            full_name: name,
+                            total_lots: numbers[0] || 0,
+                            total_rebates: numbers[1] || 0,
+                            equity: numbers[numbers.length - 1] || 0,
+                            structure: structure
+                        });
+                    }
+                }
+
+                return {
+                    rawText: fullText,
+                    records: records
+                };
             });
 
-            console.log(`📄 Page ${pageNum}: ${pageRawText.length} characters`);
+            const rawText = pageData.rawText || '';
+            const records = pageData.records || [];
 
-            if (!pageRawText || pageRawText.trim().length === 0) break;
+            console.log(`📄 Page ${pageNum}: ${rawText.length} characters, ${records.length} structured rows found`);
+
+            // Log first few clients for instant verification
+            if (records.length > 0) {
+                records.slice(0, 5).forEach(c => {
+                    console.log(`  👤 [CLIENT] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
+                });
+            }
+
+            if (!rawText || rawText.trim().length === 0) break;
 
             const response = await fetch(SYNC_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
                 body: JSON.stringify({ 
-                    raw_text: pageRawText, 
+                    records: records,
+                    raw_text: rawText, 
                     preview: false, 
                     sync_key: SYNC_KEY, 
                     source: 'cloud_engine' 
