@@ -23,16 +23,14 @@ jobs:
       - name: 📦 Install Dependencies
         run: |
           npm init -y
-          npm install puppeteer
+          npm install puppeteer puppeteer-extra puppeteer-extra-plugin-stealth
 
       - name: 🚀 Execute Worker
         env:
           PORTAL_EMAIL: ${{ secrets.PORTAL_EMAIL }}
           PORTAL_PASSWORD: ${{ secrets.PORTAL_PASSWORD }}
-          PORTAL_CLEARANCE: ${{ secrets.PORTAL_CLEARANCE }}
-          PORTAL_FX_TOKEN: ${{ secrets.PORTAL_FX_TOKEN }}
-          PORTAL_PARTNER_ID: ${{ secrets.PORTAL_PARTNER_ID }}
-          PORTAL_ANALYTICS_ID: ${{ secrets.PORTAL_ANALYTICS_ID }}
           TARGET_SYNC_URL: ${{ secrets.TARGET_SYNC_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           node scripts/client-sync-worker.js
