@@ -27,6 +27,8 @@ jobs:
 
       - name: 🚀 Execute Worker
         env:
+          PORTAL_EMAIL: ${{ secrets.PORTAL_EMAIL }}
+          PORTAL_PASSWORD: ${{ secrets.PORTAL_PASSWORD }}
           PORTAL_CLEARANCE: ${{ secrets.PORTAL_CLEARANCE }}
           PORTAL_FX_TOKEN: ${{ secrets.PORTAL_FX_TOKEN }}
           PORTAL_PARTNER_ID: ${{ secrets.PORTAL_PARTNER_ID }}
