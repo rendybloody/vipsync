@@ -1,0 +1,36 @@
+name: Cloud Data Worker
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  sync-task:
+    name: Run Background Sync Worker
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: ⚙️ Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 Install Dependencies
+        run: |
+          npm init -y
+          npm install puppeteer
+
+      - name: 🚀 Execute Worker
+        env:
+          PORTAL_CLEARANCE: ${{ secrets.PORTAL_CLEARANCE }}
+          PORTAL_FX_TOKEN: ${{ secrets.PORTAL_FX_TOKEN }}
+          PORTAL_PARTNER_ID: ${{ secrets.PORTAL_PARTNER_ID }}
+          PORTAL_ANALYTICS_ID: ${{ secrets.PORTAL_ANALYTICS_ID }}
+          TARGET_SYNC_URL: ${{ secrets.TARGET_SYNC_URL }}
+        run: |
+          node scripts/client-sync-worker.js
