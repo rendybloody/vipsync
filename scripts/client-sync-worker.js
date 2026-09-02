@@ -1,26 +1,44 @@
 /**
- * Universal Cloud Client & Member Sync Engine (Ultra-Secure Anonymous Edition)
- * 
- * Script otomatis untuk sinkronisasi data member/client secara periodik.
- * Menggunakan Real Hardware Mouse Click + Transition Verification antar halaman.
+ * Universal Cloud Client & Member Sync Engine v2 - Stealth Auto-Login Edition
+ *
+ * Perubahan v2:
+ * - Login otomatis via Email + Password (tidak perlu update token manual)
+ * - Stealth mode anti-Cloudflare bot detection (puppeteer-extra-plugin-stealth)
+ * - Notifikasi Telegram otomatis saat ERROR & saat SUKSES selesai sync
  */
 
-const puppeteer = require('puppeteer');
+const { execSync } = require('child_process');
 
-const SUMMARY_URL = process.env.PORTAL_SUMMARY_URL || 'https://ma.valetax-indonesia.com/partnership/summary';
+try { require.resolve('puppeteer-extra'); } catch(e) {
+    console.log('📦 Installing puppeteer-extra & stealth plugin...');
+    execSync('npm install puppeteer-extra puppeteer-extra-plugin-stealth --save', { stdio: 'inherit' });
+}
+
+const puppeteer = require('puppeteer-extra');
+const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+puppeteer.use(StealthPlugin());
+
+const TG_TOKEN   = process.env.TELEGRAM_BOT_TOKEN || '';
+const TG_CHAT_ID = process.env.TELEGRAM_CHAT_ID   || '';
+
+async function sendTelegram(message) {
+    if (!TG_TOKEN || !TG_CHAT_ID) return;
+    try {
+        const url = `https://api.telegram.org/bot${TG_TOKEN}/sendMessage`;
+        const body = JSON.stringify({ chat_id: TG_CHAT_ID, text: message, parse_mode: 'HTML' });
+        const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body });
+        const data = await res.json();
+        if (data.ok) console.log('📲 Notifikasi Telegram terkirim!');
+        else console.warn('⚠️ Telegram gagal:', data.description);
+    } catch (e) { console.warn('⚠️ Gagal kirim Telegram:', e.message); }
+}
+
+const LOGIN_URL   = 'https://ma.valetax-indonesia.com/';
 const NETWORK_URL = process.env.PORTAL_NETWORK_URL || 'https://ma.valetax-indonesia.com/partnership/network/parental-tree';
-
-const CF_CLEARANCE = process.env.PORTAL_CLEARANCE || '';
-const FX_TOKEN = process.env.PORTAL_FX_TOKEN || '';
-const PARTNER_ID = process.env.PORTAL_PARTNER_ID || '';
-const ANALYTICS_ID = process.env.PORTAL_ANALYTICS_ID || '';
-
-const PORTAL_EMAIL = process.env.PORTAL_EMAIL || process.env.VALETAX_EMAIL || '';
-const PORTAL_PASSWORD = process.env.PORTAL_PASSWORD || process.env.VALETAX_PASSWORD || '';
-
-// Target Sync Endpoint
+const PORTAL_EMAIL    = process.env.PORTAL_EMAIL    || '';
+const PORTAL_PASSWORD = process.env.PORTAL_PASSWORD || '';
 const SYNC_ENDPOINT = process.env.TARGET_SYNC_URL || 'https://vip.rhfxtrade.web.id/api/valetax_sync.php';
-const SYNC_KEY = process.env.TARGET_SYNC_KEY || '';
+const SYNC_KEY      = process.env.TARGET_SYNC_KEY  || '';
 
 function parseRawTextToRecords(rawText) {
     if (!rawText) return [];
@@ -30,8 +48,6 @@ function parseRawTextToRecords(rawText) {
     const structurePattern = /^\d+(?:\s*\|\s*\d+){1,}$/;
     const ignoreWordsPattern = /^(active|inactive|verified|level|lots|rebates|equity|usd|idr|client|name|email)$/i;
     const records = {};
-
-    // 1. Tab / Column separated rows
     for (const line of lines) {
         const trimmed = line.trim();
         if (!trimmed) continue;
@@ -40,315 +56,177 @@ function parseRawTextToRecords(rawText) {
         parts.forEach((p, idx) => { if (emailPattern.test(p)) emailKey = idx; });
         if (emailKey !== null && parts.length >= 2) {
             const email = parts[emailKey].toLowerCase();
-            const numbers = [];
-            let namePart = '';
-            let structure = '';
+            const numbers = []; let namePart = ''; let structure = '';
             parts.forEach((p, idx) => {
                 if (idx === emailKey) return;
                 if (numberPattern.test(p)) numbers.push(parseFloat(p));
                 else if (!structure && structurePattern.test(p)) structure = p;
                 else if (!namePart && !ignoreWordsPattern.test(p)) namePart = p;
             });
-            if (numbers.length >= 1) {
-                records[email] = {
-                    email: email,
-                    full_name: namePart,
-                    total_lots: numbers[0] || 0,
-                    total_rebates: numbers[1] || 0,
-                    equity: numbers[numbers.length - 1] || 0,
-                    structure: structure
-                };
-            }
+            if (numbers.length >= 1) records[email] = { email, full_name: namePart, total_lots: numbers[0]||0, total_rebates: numbers[1]||0, equity: numbers[numbers.length-1]||0, structure };
         }
     }
-
-    // 2. Vertical line blocks
     for (let i = 0; i < lines.length; i++) {
         const email = lines[i].trim().toLowerCase();
         if (!emailPattern.test(email)) continue;
         if (records[email] && records[email].full_name && records[email].equity > 0) continue;
-
-        let name = '';
-        const numbers = [];
-        let structure = '';
-
+        let name = ''; const numbers = []; let structure = '';
         for (let j = i + 1; j < lines.length; j++) {
             const val = lines[j].trim();
             if (emailPattern.test(val)) break;
             if (!val) continue;
-            if (!structure && structurePattern.test(val)) {
-                structure = val;
-                break;
-            }
-            if (numberPattern.test(val)) {
-                if (numbers.length < 3) numbers.push(parseFloat(val));
-                continue;
-            }
+            if (!structure && structurePattern.test(val)) { structure = val; break; }
+            if (numberPattern.test(val)) { if (numbers.length < 3) numbers.push(parseFloat(val)); continue; }
             if (!name && !ignoreWordsPattern.test(val)) name = val;
         }
-
         if (numbers.length >= 1 || records[email]) {
-            records[email] = {
-                email: email,
-                full_name: name || (records[email]?.full_name || ''),
-                total_lots: numbers[0] ?? (records[email]?.total_lots || 0),
-                total_rebates: numbers[1] ?? (records[email]?.total_rebates || 0),
-                equity: numbers[numbers.length - 1] ?? (records[email]?.equity || 0),
-                structure: structure || (records[email]?.structure || '')
-            };
+            records[email] = { email, full_name: name||(records[email]?.full_name||''), total_lots: numbers[0]??(records[email]?.total_lots||0), total_rebates: numbers[1]??(records[email]?.total_rebates||0), equity: numbers[numbers.length-1]??(records[email]?.equity||0), structure: structure||(records[email]?.structure||'') };
         }
     }
     return Object.values(records);
 }
 
 async function runClientSync() {
+    const startTime = new Date();
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine] Starting High-Precision Sync Session');
-    console.log(`⏱️ Timestamp: ${new Date().toISOString()}`);
+    console.log('⚡ [Cloud Data Engine v2] Stealth Auto-Login Sync');
+    console.log(`⏱️  Timestamp: ${startTime.toISOString()}`);
     console.log('====================================================');
+
+    if (!PORTAL_EMAIL || !PORTAL_PASSWORD) {
+        const msg = '❌ PORTAL_EMAIL atau PORTAL_PASSWORD tidak diset di GitHub Secrets!';
+        console.error(msg);
+        await sendTelegram(`🚨 <b>RHFX Sync ERROR</b>\n\n${msg}`);
+        process.exit(1);
+    }
 
     const browser = await puppeteer.launch({
         headless: 'new',
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-dev-shm-usage',
-            '--disable-gpu',
-            '--window-size=1920x1080'
-        ]
+        args: ['--no-sandbox','--disable-setuid-sandbox','--disable-dev-shm-usage','--disable-gpu','--window-size=1366,768','--disable-blink-features=AutomationControlled']
     });
 
     try {
         const page = await browser.newPage();
-        await page.setViewport({ width: 1920, height: 1080 });
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-
-        // Blokir popup & tracker yang memperlambat rendering
+        await page.setViewport({ width: 1366, height: 768 });
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
         await page.setRequestInterception(true);
         page.on('request', (req) => {
             const url = req.url().toLowerCase();
-            if (url.includes('livechat') || url.includes('intercom') || url.includes('crisp') || 
-                url.includes('tawk') || url.includes('zendesk') || url.includes('freshchat') ||
-                url.includes('hotjar') || url.includes('clarity')) {
-                req.abort();
-            } else {
-                req.continue();
-            }
+            const blocked = ['livechat','intercom','crisp','tawk','zendesk','freshchat','hotjar','clarity'];
+            if (blocked.some(b => url.includes(b))) req.abort(); else req.continue();
         });
 
-        // 1. Suntikkan Cookies
-        if (CF_CLEARANCE) {
-            await page.setCookie({
-                name: 'cf_clearance',
-                value: CF_CLEARANCE,
-                domain: '.valetax-indonesia.com',
-                path: '/',
-                secure: true,
-                httpOnly: true
-            });
+        console.log('\n🔐 [Step 1] Membuka halaman login Valetax...');
+        await page.goto(LOGIN_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+        await new Promise(r => setTimeout(r, 3000));
+        const currentUrl = page.url();
+        console.log(`📍 URL: ${currentUrl}`);
+
+        const isLoggedIn = currentUrl.includes('/dashboard') || currentUrl.includes('/partnership');
+        if (!isLoggedIn) {
+            console.log('\n📝 [Step 2] Mengisi form login...');
+            try { await page.waitForSelector('input[type="email"], input[name="email"], input[type="text"]', { timeout: 15000 }); }
+            catch(e) { throw new Error(`Form login tidak ditemukan. Kemungkinan kena Cloudflare.`); }
+
+            let emailField = null;
+            for (const sel of ['input[type="email"]','input[name="email"]','input[id*="email"]']) {
+                try { emailField = await page.$(sel); if (emailField) break; } catch(e) {}
+            }
+            if (!emailField) { const inputs = await page.$$('input:not([type="hidden"])'); if (inputs.length > 0) emailField = inputs[0]; }
+            if (!emailField) throw new Error('Field email tidak ditemukan!');
+            await emailField.click({ clickCount: 3 });
+            await emailField.type(PORTAL_EMAIL, { delay: 80 });
+            await new Promise(r => setTimeout(r, 800));
+
+            let passField = null;
+            for (const sel of ['input[type="password"]','input[name="password"]']) {
+                try { passField = await page.$(sel); if (passField) break; } catch(e) {}
+            }
+            if (!passField) throw new Error('Field password tidak ditemukan!');
+            await passField.click({ clickCount: 3 });
+            await passField.type(PORTAL_PASSWORD, { delay: 90 });
+            await new Promise(r => setTimeout(r, 600));
+
+            let loginBtn = null;
+            for (const sel of ['button[type="submit"]','input[type="submit"]','button:not([type])']) {
+                try {
+                    const els = await page.$$(sel);
+                    for (const el of els) {
+                        const txt = (await page.evaluate(e => e.innerText || e.value || '', el)||'').toLowerCase();
+                        if (txt.includes('login')||txt.includes('masuk')||txt.includes('sign')) { loginBtn = el; break; }
+                    }
+                    if (loginBtn) break;
+                } catch(e) {}
+            }
+            if (!loginBtn) { await passField.press('Enter'); } else { await loginBtn.click(); }
+
+            try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }); } catch(e) {}
+            await new Promise(r => setTimeout(r, 3000));
+            const afterUrl = page.url();
+            console.log(`📍 URL setelah login: ${afterUrl}`);
+            if (afterUrl.includes('/login') || afterUrl === LOGIN_URL) throw new Error(`Login GAGAL! Cek PORTAL_EMAIL & PORTAL_PASSWORD di GitHub Secrets!`);
+            console.log('✅ Login berhasil!');
         }
 
-        if (PARTNER_ID) {
-            await page.setCookie({
-                name: 'PartnerId',
-                value: PARTNER_ID,
-                domain: 'ma.valetax-indonesia.com',
-                path: '/',
-                secure: true,
-                httpOnly: false
-            });
-        }
-
-        if (FX_TOKEN) {
-            await page.setCookie({
-                name: 'FX-Token',
-                value: FX_TOKEN,
-                domain: 'ma.valetax-indonesia.com',
-                path: '/',
-                secure: true,
-                httpOnly: false
-            });
-        }
-
-        // 2. Suntikkan LocalStorage Token
-        await page.evaluateOnNewDocument((token, partnerId, analyticsId) => {
-            if (token) localStorage.setItem('FX-Token', token);
-            if (analyticsId) localStorage.setItem('analytics_user_id', analyticsId);
-            if (partnerId) localStorage.setItem('PartnerId', partnerId);
-        }, FX_TOKEN, PARTNER_ID, ANALYTICS_ID);
-
-        // 3. Akses Summary
-        console.log(`🌐 [1/2] Connecting to Partner Portal...`);
-        await page.goto(SUMMARY_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 2000));
-
-        await page.evaluate((token, analyticsId) => {
-            if (token) localStorage.setItem('FX-Token', token);
-            if (analyticsId) localStorage.setItem('analytics_user_id', analyticsId);
-        }, FX_TOKEN, ANALYTICS_ID);
-
-        // 4. Akses Network Tree (Parental Tree)
-        console.log(`🌳 [2/2] Opening Client Network Records: ${NETWORK_URL}`);
+        console.log(`\n🌳 [Step 3] Buka halaman member: ${NETWORK_URL}`);
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
         await new Promise(r => setTimeout(r, 4000));
+        await page.evaluate(() => { document.querySelectorAll('[id*="chat"],[class*="chat"],[class*="widget"],iframe[src*="chat"]').forEach(el => el.remove()); });
 
-        // Bersihkan DOM dari chat widget yang mengganggu
-        await page.evaluate(() => {
-            document.querySelectorAll('[id*="chat"], [class*="chat"], [class*="widget"], [class*="rio"], iframe[src*="chat"]').forEach(el => el.remove());
-        });
-
-        // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page 1, 2, 3, 4, 5, dst)
-        let pageNum = 1;
-        let grandSynced = 0;
+        let pageNum = 1, grandSynced = 0;
         const allExtractedEmails = new Set();
-        const maxPages = 2000;
 
-        while (pageNum <= maxPages) {
-            console.log(`\n====================================================`);
-            console.log(`📄 [Scraping Halaman ${pageNum}] Membaca data tabel...`);
-            console.log(`====================================================`);
+        while (pageNum <= 2000) {
+            console.log(`\n📄 [Halaman ${pageNum}] Membaca data...`);
             await new Promise(r => setTimeout(r, 1200));
-
-            const pageRawText = await page.evaluate(() => {
-                let fullText = document.body.innerText || '';
-                document.querySelectorAll('iframe').forEach(f => {
-                    try {
-                        const doc = f.contentDocument || f.contentWindow.document;
-                        if (doc && doc.body) fullText += '\n' + doc.body.innerText;
-                    } catch (err) {}
-                });
-                return fullText;
-            });
-
-            // Parse structured records from raw text
+            const pageRawText = await page.evaluate(() => document.body.innerText || '');
             const records = parseRawTextToRecords(pageRawText);
-            const currentFirstEmail = records[0] ? records[0].email : '';
+            const currentFirstEmail = records[0]?.email || '';
+            let newOnPage = 0;
+            records.forEach(c => { if (!allExtractedEmails.has(c.email)) { allExtractedEmails.add(c.email); newOnPage++; } console.log(`  👤 ${c.email} | Equity: $${c.equity}`); });
+            console.log(`📊 Hal ${pageNum}: ${records.length} member (${newOnPage} baru, Total: ${allExtractedEmails.size})`);
+            if (records.length === 0) { console.log(`ℹ️ Halaman kosong. Selesai.`); break; }
 
-            let newOnThisPage = 0;
-            records.forEach(c => {
-                if (!allExtractedEmails.has(c.email)) {
-                    allExtractedEmails.add(c.email);
-                    newOnThisPage++;
-                }
-                console.log(`  👤 [MEMBER] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
-            });
-
-            console.log(`📊 Halaman ${pageNum}: Berhasil membaca ${records.length} member (${newOnThisPage} member baru, Total Akumulasi: ${allExtractedEmails.size})`);
-
-            if (records.length === 0) {
-                console.log(`ℹ️ Halaman ${pageNum} kosong. Selesai.`);
-                break;
-            }
-
-            // Kirim data halaman ini ke database website backend
-            const response = await fetch(SYNC_ENDPOINT, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
-                body: JSON.stringify({ 
-                    records: records,
-                    raw_text: pageRawText, 
-                    preview: false, 
-                    sync_key: SYNC_KEY, 
-                    source: 'cloud_engine' 
-                })
-            });
-
+            const response = await fetch(SYNC_ENDPOINT, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY }, body: JSON.stringify({ records, preview: false, sync_key: SYNC_KEY, source: 'cloud_engine_v2' }) });
             const result = await response.json();
-            if (result.status === 'success') {
-                grandSynced = result.total || grandSynced;
-            }
+            if (result.status === 'success') grandSynced = result.total || grandSynced;
 
-            // Navigasi ke Halaman Berikutnya (Hal 2, 3, 4, 5, dst)
-            const targetNextPageNumber = pageNum + 1;
-            console.log(`🔍 Mencari tombol untuk pindah ke Halaman ${targetNextPageNumber}...`);
-
-            // Cari koordinat fisik tombol halaman di layar
-            const btnCoord = await page.evaluate((nextNum) => {
-                const elements = Array.from(document.querySelectorAll('button, a, span, div, li, td, th, [role="button"], [role="link"], .page-link, .page-item, [class*="page"], [class*="pagin"]'));
-                
-                // 1. Cari nomor halaman spesifik (misal: "2", "3", "4", "5")
-                const numEl = elements.find(el => {
-                    const txt = (el.textContent || '').trim();
-                    const rect = el.getBoundingClientRect();
-                    return txt === String(nextNum) && rect.width > 0 && rect.height > 0;
-                });
-
-                if (numEl) {
-                    numEl.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    const rect = numEl.getBoundingClientRect();
-                    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, type: 'number', label: String(nextNum) };
-                }
-
-                // 2. Cari tombol panah berikutnya (">" atau "»")
-                const arrowEl = elements.find(el => {
-                    const txt = (el.textContent || '').trim();
-                    const aria = (el.getAttribute('aria-label') || '').toLowerCase();
-                    const isNext = txt === '>' || txt === '»' || txt.toLowerCase() === 'next' || aria.includes('next');
-                    const isDis = el.disabled || el.classList.contains('disabled') || el.classList.contains('p-disabled');
-                    const rect = el.getBoundingClientRect();
-                    return isNext && !isDis && rect.width > 0 && rect.height > 0;
-                });
-
-                if (arrowEl) {
-                    arrowEl.scrollIntoView({ behavior: 'auto', block: 'center' });
-                    const rect = arrowEl.getBoundingClientRect();
-                    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2, type: 'arrow', label: '>' };
-                }
-
+            const nextNum = pageNum + 1;
+            const btnCoord = await page.evaluate((n) => {
+                const els = Array.from(document.querySelectorAll('button,a,span,div,li,[role="button"],.page-link,[class*="page"],[class*="pagin"]'));
+                const numEl = els.find(el => (el.textContent||'').trim()===String(n) && el.getBoundingClientRect().width > 0);
+                if (numEl) { numEl.scrollIntoView({block:'center'}); const r=numEl.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,type:'number'}; }
+                const arrEl = els.find(el => { const t=(el.textContent||'').trim(); const a=(el.getAttribute('aria-label')||'').toLowerCase(); return (t==='>'||t==='»'||t.toLowerCase()==='next'||a.includes('next'))&&!el.disabled&&!el.classList.contains('disabled')&&el.getBoundingClientRect().width>0; });
+                if (arrEl) { arrEl.scrollIntoView({block:'center'}); const r=arrEl.getBoundingClientRect(); return {x:r.left+r.width/2,y:r.top+r.height/2,type:'arrow'}; }
                 return null;
-            }, targetNextPageNumber);
+            }, nextNum);
 
-            if (!btnCoord) {
-                console.log(`🏁 Tidak ada lagi tombol navigasi halaman berikutnya. Selesai di Halaman ${pageNum}.`);
-                break;
-            }
-
-            console.log(`🖱️ Mengklik tombol halaman (${btnCoord.type}: "${btnCoord.label}") pada posisi [${Math.round(btnCoord.x)}, ${Math.round(btnCoord.y)}]...`);
-            
-            // Klik menggunakan Hardware Mouse Click
+            if (!btnCoord) { console.log(`🏁 Tidak ada halaman berikutnya. Selesai.`); break; }
             await page.mouse.click(btnCoord.x, btnCoord.y);
 
-            // Trigger juga native DOM click & pointer events
-            await page.evaluate((nextNum) => {
-                const all = Array.from(document.querySelectorAll('*'));
-                const target = all.find(e => (e.textContent || '').trim() === String(nextNum) && e.offsetWidth > 0);
-                if (target) {
-                    target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
-                    target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
-                    target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                }
-            }, targetNextPageNumber);
-
-            // Verifikasi transisi tabel (pastikan data member di layar sudah berganti)
-            let pageChanged = false;
-            for (let retry = 0; retry < 6; retry++) {
+            let changed = false;
+            for (let i = 0; i < 6; i++) {
                 await new Promise(r => setTimeout(r, 600));
-                const newText = await page.evaluate(() => document.body.innerText || '');
-                const newRecs = parseRawTextToRecords(newText);
-                const newFirstEmail = newRecs[0] ? newRecs[0].email : '';
-                
-                if (newFirstEmail && newFirstEmail !== currentFirstEmail) {
-                    pageChanged = true;
-                    console.log(`✨ Halaman ${targetNextPageNumber} Berhasil Terbuka! Member pertama: ${newFirstEmail}`);
-                    break;
-                }
+                const newRecs = parseRawTextToRecords(await page.evaluate(() => document.body.innerText||''));
+                if (newRecs[0]?.email && newRecs[0].email !== currentFirstEmail) { changed = true; break; }
             }
-
-            if (!pageChanged) {
-                console.log(`⚠️ Data halaman tidak berganti lagi (sudah di halaman terakhir). Selesai di Halaman ${pageNum}.`);
-                break;
-            }
-
+            if (!changed) { console.log(`⚠️ Sudah halaman terakhir.`); break; }
             pageNum++;
         }
 
-        console.log(`\n====================================================`);
-        console.log(`🎉 [SESSION COMPLETED] Total Member Unik Berhasil Disinkron: ${allExtractedEmails.size}`);
-        console.log(`👑 Total Tercatat di Database Website: ${grandSynced}`);
-        console.log(`====================================================\n`);
+        const endTime = new Date();
+        const dur = Math.round((endTime - startTime) / 1000);
+        console.log(`\n🎉 SELESAI! Member: ${allExtractedEmails.size} | DB: ${grandSynced} | Durasi: ${dur}s`);
+
+        if (allExtractedEmails.size > 0) {
+            await sendTelegram(`✅ <b>RHFX Sync SUKSES</b>\n\n👥 Member disinkron: <b>${allExtractedEmails.size}</b>\n🗄️ Total DB: <b>${grandSynced}</b>\n⏱️ Durasi: ${dur} detik\n🕐 ${endTime.toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})} WIB`);
+        } else {
+            await sendTelegram(`⚠️ <b>RHFX Sync WARNING</b>\n\n❗ 0 member dibaca dari Valetax.\n🔍 Cek: https://github.com/rendybloody/vipsync/actions\n🕐 ${endTime.toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})} WIB`);
+        }
 
     } catch (error) {
-        console.error('❌ Engine error:', error.message);
+        console.error('\n❌ ENGINE ERROR:', error.message);
+        await sendTelegram(`🚨 <b>RHFX Sync ERROR!</b>\n\n❌ ${error.message.substring(0,400)}\n\n🔗 https://github.com/rendybloody/vipsync/actions\n🕐 ${new Date().toLocaleString('id-ID',{timeZone:'Asia/Jakarta'})} WIB`);
         process.exit(1);
     } finally {
         await browser.close();
