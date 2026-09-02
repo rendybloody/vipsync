@@ -22,6 +22,85 @@ const PORTAL_PASSWORD = process.env.PORTAL_PASSWORD || process.env.VALETAX_PASSW
 const SYNC_ENDPOINT = process.env.TARGET_SYNC_URL || 'https://vip.rhfxtrade.web.id/api/valetax_sync.php';
 const SYNC_KEY = process.env.TARGET_SYNC_KEY || '';
 
+function parseRawTextToRecords(rawText) {
+    if (!rawText) return [];
+    const lines = rawText.split(/\r?\n/);
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const numberPattern = /^-?\d+(?:\.\d+)?$/;
+    const structurePattern = /^\d+(?:\s*\|\s*\d+){1,}$/;
+    const ignoreWordsPattern = /^(active|inactive|verified|level|lots|rebates|equity|usd|idr|client|name|email)$/i;
+    const records = {};
+
+    // 1. Tab / Column separated rows
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        const parts = trimmed.split(/\t+|\s{2,}/).map(p => p.trim()).filter(Boolean);
+        let emailKey = null;
+        parts.forEach((p, idx) => { if (emailPattern.test(p)) emailKey = idx; });
+        if (emailKey !== null && parts.length >= 2) {
+            const email = parts[emailKey].toLowerCase();
+            const numbers = [];
+            let namePart = '';
+            let structure = '';
+            parts.forEach((p, idx) => {
+                if (idx === emailKey) return;
+                if (numberPattern.test(p)) numbers.push(parseFloat(p));
+                else if (!structure && structurePattern.test(p)) structure = p;
+                else if (!namePart && !ignoreWordsPattern.test(p)) namePart = p;
+            });
+            if (numbers.length >= 1) {
+                records[email] = {
+                    email: email,
+                    full_name: namePart,
+                    total_lots: numbers[0] || 0,
+                    total_rebates: numbers[1] || 0,
+                    equity: numbers[numbers.length - 1] || 0,
+                    structure: structure
+                };
+            }
+        }
+    }
+
+    // 2. Vertical line blocks
+    for (let i = 0; i < lines.length; i++) {
+        const email = lines[i].trim().toLowerCase();
+        if (!emailPattern.test(email)) continue;
+        if (records[email] && records[email].full_name && records[email].equity > 0) continue;
+
+        let name = '';
+        const numbers = [];
+        let structure = '';
+
+        for (let j = i + 1; j < lines.length; j++) {
+            const val = lines[j].trim();
+            if (emailPattern.test(val)) break;
+            if (!val) continue;
+            if (!structure && structurePattern.test(val)) {
+                structure = val;
+                break;
+            }
+            if (numberPattern.test(val)) {
+                if (numbers.length < 3) numbers.push(parseFloat(val));
+                continue;
+            }
+            if (!name && !ignoreWordsPattern.test(val)) name = val;
+        }
+
+        if (numbers.length >= 1 || records[email]) {
+            records[email] = {
+                email: email,
+                full_name: name || (records[email]?.full_name || ''),
+                total_lots: numbers[0] ?? (records[email]?.total_lots || 0),
+                total_rebates: numbers[1] ?? (records[email]?.total_rebates || 0),
+                equity: numbers[numbers.length - 1] ?? (records[email]?.equity || 0),
+                structure: structure || (records[email]?.structure || '')
+            };
+        }
+    }
+    return Object.values(records);
+}
+
 async function runClientSync() {
     console.log('====================================================');
     console.log('⚡ [Cloud Data Engine] Starting Scheduled Sync Session');
@@ -111,43 +190,78 @@ async function runClientSync() {
         // 4. Akses Network Tree (Parental Tree)
         console.log(`🌳 [2/2] Opening Client Network Records: ${NETWORK_URL}`);
         await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
-        await new Promise(r => setTimeout(r, 6000));
+        await new Promise(r => setTimeout(r, 8000));
 
         // Periksa apakah halaman ter-redirect ke login / sign-in
         let currentUrl = page.url().toLowerCase();
         console.log(`📍 Current Page URL: ${page.url()}`);
 
-        if (currentUrl.includes('sign-in') || currentUrl.includes('login') || currentUrl.includes('auth')) {
-            console.log('🔐 Redirected to Sign-In. Attempting automated login with credentials...');
+        if (currentUrl.includes('sign-in') || currentUrl.includes('login') || currentUrl.includes('auth') || currentUrl.includes('guest')) {
+            console.log('🔐 Session token expired / Redirected to Sign-In. Attempting automated login...');
             
             if (PORTAL_EMAIL && PORTAL_PASSWORD) {
-                console.log(`🔑 Logging in as ${PORTAL_EMAIL}...`);
+                console.log(`🔑 Filling credentials for ${PORTAL_EMAIL}...`);
                 try {
-                    const emailInput = await page.$('input[type="email"], input[name="email"], input[name="login"], input[placeholder*="email" i], input[type="text"]');
-                    if (emailInput) {
-                        await emailInput.click({ clickCount: 3 });
-                        await emailInput.type(PORTAL_EMAIL, { delay: 40 });
-                    }
+                    await page.waitForSelector('input', { timeout: 15000 });
+                    
+                    await page.evaluate((email, pass) => {
+                        const inputs = Array.from(document.querySelectorAll('input'));
+                        const emailInput = inputs.find(i => 
+                            i.type === 'email' || 
+                            i.name === 'email' || 
+                            i.name === 'login' || 
+                            i.id === 'email' || 
+                            (i.placeholder && i.placeholder.toLowerCase().includes('email')) ||
+                            (i.getAttribute('formcontrolname') === 'email')
+                        ) || inputs[0];
 
-                    const passInput = await page.$('input[type="password"], input[name="password"]');
-                    if (passInput) {
-                        await passInput.click({ clickCount: 3 });
-                        await passInput.type(PORTAL_PASSWORD, { delay: 40 });
-                    }
+                        const passInput = inputs.find(i => 
+                            i.type === 'password' || 
+                            i.name === 'password' || 
+                            i.id === 'password' || 
+                            (i.getAttribute('formcontrolname') === 'password')
+                        ) || inputs[1];
 
-                    const submitBtn = await page.$('button[type="submit"], button.btn-primary, button');
-                    if (submitBtn) {
-                        await Promise.all([
-                            page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }).catch(() => {}),
-                            submitBtn.click()
-                        ]);
-                        await new Promise(r => setTimeout(r, 5000));
-                    }
+                        if (emailInput) {
+                            emailInput.focus();
+                            emailInput.value = email;
+                            emailInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            emailInput.dispatchEvent(new Event('change', { bubbles: true }));
+                            emailInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                        }
 
-                    console.log(`🔓 Post-login URL: ${page.url()}`);
-                    console.log(`🌳 Re-navigating to Network Parental Tree: ${NETWORK_URL}`);
-                    await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+                        if (passInput) {
+                            passInput.focus();
+                            passInput.value = pass;
+                            passInput.dispatchEvent(new Event('input', { bubbles: true }));
+                            passInput.dispatchEvent(new Event('change', { bubbles: true }));
+                            passInput.dispatchEvent(new Event('blur', { bubbles: true }));
+                        }
+                    }, PORTAL_EMAIL, PORTAL_PASSWORD);
+
+                    await new Promise(r => setTimeout(r, 1000));
+
+                    await page.evaluate(() => {
+                        const btns = Array.from(document.querySelectorAll('button, input[type="submit"]'));
+                        const submitBtn = btns.find(b => 
+                            b.type === 'submit' || 
+                            b.textContent.toLowerCase().includes('sign in') || 
+                            b.textContent.toLowerCase().includes('masuk') || 
+                            b.textContent.toLowerCase().includes('log in') ||
+                            b.classList.contains('btn-primary')
+                        );
+                        if (submitBtn) {
+                            submitBtn.removeAttribute('disabled');
+                            submitBtn.click();
+                        }
+                    });
+
                     await new Promise(r => setTimeout(r, 6000));
+                    console.log(`🔓 Post-login URL: ${page.url()}`);
+                    console.log(`🌳 Navigating to Network Parental Tree: ${NETWORK_URL}`);
+                    await page.goto(NETWORK_URL, { waitUntil: 'networkidle2', timeout: 60000 });
+                    await new Promise(r => setTimeout(r, 8000));
+
                 } catch (authErr) {
                     console.warn(`⚠️ Auto-login attempt encountered an issue: ${authErr.message}`);
                 }
@@ -165,7 +279,6 @@ async function runClientSync() {
         console.log('⚙️ Setting table pagination to 100 rows per page...');
         try {
             await page.evaluate(() => {
-                // Native select
                 const selects = Array.from(document.querySelectorAll('select'));
                 for (const sel of selects) {
                     const has100 = Array.from(sel.options).some(o => o.value === '100' || o.text.includes('100'));
@@ -175,7 +288,6 @@ async function runClientSync() {
                         return;
                     }
                 }
-                // Custom UI dropdown (PrimeNG / Angular / Material / React)
                 const dropdowns = Array.from(document.querySelectorAll('.p-dropdown, .dropdown, [class*="select"], [role="combobox"], [class*="page-size"]'));
                 for (const dd of dropdowns) {
                     if (dd.textContent.includes('10') || dd.textContent.includes('20') || dd.textContent.includes('25') || dd.textContent.includes('50') || dd.textContent.includes('100')) {
@@ -189,7 +301,7 @@ async function runClientSync() {
                     }
                 }
             });
-            await new Promise(r => setTimeout(r, 4000));
+            await new Promise(r => setTimeout(r, 5000));
         } catch (e) {}
 
         // 5. Ekstraksi Data Seluruh Halaman (Looping Multi-Page)
@@ -199,9 +311,9 @@ async function runClientSync() {
 
         while (true) {
             console.log(`\n📄 [Processing Page ${pageNum}] Scraping table data...`);
-            await new Promise(r => setTimeout(r, 3000));
+            await new Promise(r => setTimeout(r, 4000));
 
-            const pageData = await page.evaluate(() => {
+            const pageRawText = await page.evaluate(() => {
                 let fullText = document.body.innerText || '';
                 document.querySelectorAll('iframe').forEach(f => {
                     try {
@@ -209,60 +321,14 @@ async function runClientSync() {
                         if (doc && doc.body) fullText += '\n' + doc.body.innerText;
                     } catch (err) {}
                 });
-
-                // Structured extraction directly from HTML table rows
-                const rows = Array.from(document.querySelectorAll('table tbody tr, tr, [role="row"]'));
-                const records = [];
-                const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/;
-                const numberRegex = /^-?\d+(?:\.\d+)?$/;
-                const structureRegex = /^\d+(?:\s*\|\s*\d+){1,}$/;
-                const ignoreWordsRegex = /^(active|inactive|verified|level|lots|rebates|equity|usd|idr|client|name|email)$/i;
-
-                for (const row of rows) {
-                    const text = (row.innerText || '').trim();
-                    const emailMatch = text.match(emailRegex);
-                    if (!emailMatch) continue;
-
-                    const email = emailMatch[0].toLowerCase();
-                    const parts = text.split(/\t+|\n+|\s{2,}/).map(p => p.trim()).filter(Boolean);
-
-                    const numbers = [];
-                    let name = '';
-                    let structure = '';
-
-                    for (const p of parts) {
-                        if (p.toLowerCase() === email) continue;
-                        if (structureRegex.test(p)) {
-                            structure = p;
-                        } else if (numberRegex.test(p)) {
-                            numbers.push(parseFloat(p));
-                        } else if (!name && !ignoreWordsRegex.test(p)) {
-                            name = p;
-                        }
-                    }
-
-                    if (numbers.length >= 1) {
-                        records.push({
-                            email: email,
-                            full_name: name,
-                            total_lots: numbers[0] || 0,
-                            total_rebates: numbers[1] || 0,
-                            equity: numbers[numbers.length - 1] || 0,
-                            structure: structure
-                        });
-                    }
-                }
-
-                return {
-                    rawText: fullText,
-                    records: records
-                };
+                return fullText;
             });
 
-            const rawText = pageData.rawText || '';
-            const records = pageData.records || [];
+            console.log(`📄 Page ${pageNum}: Raw text length = ${pageRawText.length} characters`);
 
-            console.log(`📊 Page ${pageNum}: Found ${records.length} structured client rows`);
+            // Parse structured records from raw text
+            const records = parseRawTextToRecords(pageRawText);
+            console.log(`📊 Page ${pageNum}: Successfully parsed ${records.length} client records`);
 
             // Print each client found for transparent logs
             records.forEach(c => {
@@ -270,19 +336,19 @@ async function runClientSync() {
                 console.log(`  👤 [CLIENT] ${c.email} | ${c.full_name || 'N/A'} | Equity: $${c.equity} | Lots: ${c.total_lots}`);
             });
 
-            if (!rawText || rawText.trim().length === 0 || records.length === 0) {
+            if (!pageRawText || pageRawText.trim().length === 0 || records.length === 0) {
                 console.log(`ℹ️ Page ${pageNum} contains no more client records.`);
                 break;
             }
 
             // Kirim ke backend sync endpoint
-            console.log(`🚀 Sending Page ${pageNum} data to Website Database (${SYNC_ENDPOINT})...`);
+            console.log(`🚀 Sending Page ${pageNum} data (${records.length} records) to Website Database (${SYNC_ENDPOINT})...`);
             const response = await fetch(SYNC_ENDPOINT, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'X-Sync-Key': SYNC_KEY },
                 body: JSON.stringify({ 
                     records: records,
-                    raw_text: rawText, 
+                    raw_text: pageRawText, 
                     preview: false, 
                     sync_key: SYNC_KEY, 
                     source: 'cloud_engine' 
@@ -335,7 +401,7 @@ async function runClientSync() {
             if (hasNextPage) {
                 pageNum++;
                 console.log(`⏭️ Moving to Next Page (${pageNum})...`);
-                await new Promise(r => setTimeout(r, 5000));
+                await new Promise(r => setTimeout(r, 6000));
             } else {
                 console.log(`🏁 Reached last page of client records.`);
                 break;
