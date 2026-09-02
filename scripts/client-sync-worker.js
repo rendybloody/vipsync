@@ -1,10 +1,11 @@
 /**
- * Universal Cloud Client & Member Sync Engine v3.1 - Detailed VIP Member List Report
+ * Universal Cloud Client & Member Sync Engine v3.2 - Smart Auto-Login & Conditional Captcha
  *
  * Fitur:
- * - Session Caching (Bebas captcha jika sesi aktif)
+ * - Session Caching (Bebas login jika sesi aktif)
+ * - Auto-Submit Sign In langsung jika tidak ada captcha
+ * - HANYA kirim foto ke Telegram jika kotak captcha benar-benar muncul
  * - Laporan Telegram lengkap dengan daftar member lolos VIP & nominal equity
- * - Urutan member berdasarkan equity terbesar
  */
 
 const { execSync } = require('child_process');
@@ -123,7 +124,7 @@ function parseRawTextToRecords(rawText) {
 async function runClientSync() {
     const startTime = new Date();
     console.log('====================================================');
-    console.log('⚡ [Cloud Data Engine v3.1] Session Caching Sync');
+    console.log('⚡ [Cloud Data Engine v3.2] Smart Login & Sync');
     console.log(`⏱️  Timestamp: ${startTime.toISOString()}`);
     console.log('====================================================');
 
@@ -215,7 +216,7 @@ async function runClientSync() {
                 throw new Error(`Form login tidak ditemukan. Kemungkinan kena Cloudflare.\nISI HALAMAN: ${pageText}`);
             }
 
-            // Isi Email
+            // 1. Isi Email
             const emailSelectors = ['input[type="email"]', 'input[name="email"]', 'input[id*="email"]', 'input[placeholder*="email" i]'];
             let emailField = null;
             for (const sel of emailSelectors) {
@@ -228,7 +229,7 @@ async function runClientSync() {
             console.log(`✍️  Email diisi: ${PORTAL_EMAIL}`);
             await new Promise(r => setTimeout(r, 600));
 
-            // Isi Password
+            // 2. Isi Password
             const passSelectors = ['input[type="password"]', 'input[name="password"]', 'input[id*="password"]'];
             let passField = null;
             for (const sel of passSelectors) {
@@ -238,115 +239,136 @@ async function runClientSync() {
             await passField.click({ clickCount: 3 });
             await passField.type(PORTAL_PASSWORD, { delay: 90 });
             console.log('🔑 Password diisi.');
-            
-            console.log('⏳ Menunggu 5 detik agar form & gambar captcha termuat...');
-            await new Promise(r => setTimeout(r, 5000));
+            await new Promise(r => setTimeout(r, 1000));
 
-            // Screenshot & Kirim ke Telegram
-            console.log('📸 Mengambil screenshot form login & mengirim ke Telegram...');
-            const screenshotBuf = await page.screenshot({ type: 'png', fullPage: false });
-
-            if (TG_TOKEN && TG_CHAT_ID) {
-                try {
-                    const formData = new FormData();
-                    formData.append('chat_id', TG_CHAT_ID);
-                    formData.append('caption', '📸 <b>RHFX Sync: KODE CAPTCHA DIPERLUKAN!</b>\n\nLihat gambar di atas, lalu <b>BALAS chat ini dengan 4 ANGKA</b> captchanya!\n\n💡 <i>Sesi login akan disimpan otomatis agar sync berikutnya tidak perlu captcha lagi.</i>\n\n⏳ <i>Robot menunggu balasan Anda selama 3 menit...</i>');
-                    formData.append('parse_mode', 'HTML');
-                    formData.append('photo', new Blob([screenshotBuf], { type: 'image/png' }), 'captcha.png');
-
-                    await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, {
-                        method: 'POST',
-                        body: formData
-                    });
-                    console.log('📲 Foto screenshot login berhasil dikirim ke Telegram!');
-                } catch(err) {
-                    console.warn('⚠️ Gagal kirim foto via FormData, mengirim pesan teks:', err.message);
-                    await sendTelegram('📸 <b>RHFX Sync: Butuh Kode CAPTCHA 4 Angka!</b>\n\nBuka Valetax di browser, lihat kode captchanya, lalu <b>balas pesan ini dengan 4 angka</b> tersebut!\n⏳ Robot menunggu 3 menit...');
-                }
-
-                let lastUpdateId = 0;
-                try {
-                    const initRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?limit=1&offset=-1`);
-                    const initData = await initRes.json();
-                    if (initData.ok && initData.result.length > 0) {
-                        lastUpdateId = initData.result[initData.result.length - 1].update_id;
-                    }
-                } catch(e) {}
-
-                let captchaCode = null;
-                console.log('⏳ Menunggu balasan 4 angka dari Telegram bro (maks 3 menit)...');
-
-                for (let attempt = 0; attempt < 60; attempt++) {
-                    await new Promise(r => setTimeout(r, 3000));
+            const findAndClickLoginBtn = async () => {
+                let loginBtn = null;
+                const loginSelectors = ['button[type="submit"]', 'input[type="submit"]', 'button:not([type])'];
+                for (const sel of loginSelectors) {
                     try {
-                        const updRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`);
-                        const updData = await updRes.json();
-                        if (updData.ok && updData.result.length > 0) {
-                            for (const upd of updData.result) {
-                                lastUpdateId = upd.update_id;
-                                const msgText = (upd.message?.text || '').trim();
-                                if (/^\d{4,6}$/.test(msgText)) {
-                                    captchaCode = msgText;
-                                    console.log(`🎯 KODE CAPTCHA DITERIMA DARI TELEGRAM: ${captchaCode}`);
-                                    break;
-                                }
+                        const els = await page.$$(sel);
+                        for (const el of els) {
+                            const txt = (await page.evaluate(e => e.innerText || e.value || '', el) || '').toLowerCase();
+                            if (txt.includes('login') || txt.includes('masuk') || txt.includes('sign') || txt.includes('submit')) {
+                                loginBtn = el; break;
                             }
+                        }
+                        if (loginBtn) break;
+                    } catch(e) {}
+                }
+                if (!loginBtn) { await passField.press('Enter'); } else { await loginBtn.click(); console.log('🖱️  Tombol login diklik.'); }
+            };
+
+            const getCaptchaInput = async () => {
+                return await page.$('input[name*="captcha" i], input[id*="captcha" i], input[placeholder*="captcha" i], input[placeholder*="kode" i], input[placeholder*="code" i], input[placeholder*="angka" i]');
+            };
+
+            // 3. Cek apakah ada captcha di awal
+            let captchaField = await getCaptchaInput();
+
+            if (!captchaField) {
+                console.log('ℹ️ Tidak ada kotak captcha di awal. Mencoba klik Sign In langsung...');
+                await findAndClickLoginBtn();
+                await new Promise(r => setTimeout(r, 3500));
+
+                const checkUrl = page.url();
+                const directLoginSuccess = !checkUrl.includes('/sign-in') && !checkUrl.includes('/guest') && !checkUrl.includes('/auth') && checkUrl !== LOGIN_URL;
+
+                if (directLoginSuccess) {
+                    console.log('🎉 Login LANGSUNG SUKSES tanpa captcha!');
+                } else {
+                    captchaField = await getCaptchaInput();
+                }
+            }
+
+            // 4. JIKA CAPTCHA MUNCUL -> Barulah Kirim Screenshot ke Telegram & Tunggu Balasan
+            const postClickUrl = page.url();
+            const stillNeedLogin = postClickUrl.includes('/sign-in') || postClickUrl.includes('/guest') || postClickUrl === LOGIN_URL;
+
+            if (stillNeedLogin && captchaField) {
+                console.log('🔢 Kotak Captcha TERDETEKSI! Mengambil screenshot & kirim ke Telegram...');
+                const screenshotBuf = await page.screenshot({ type: 'png', fullPage: false });
+
+                if (TG_TOKEN && TG_CHAT_ID) {
+                    try {
+                        const formData = new FormData();
+                        formData.append('chat_id', TG_CHAT_ID);
+                        formData.append('caption', '📸 <b>RHFX Sync: KODE CAPTCHA DIPERLUKAN!</b>\n\nLihat gambar di atas, lalu <b>BALAS chat ini dengan 4 ANGKA</b> captchanya!\n\n💡 <i>Sesi login akan disimpan otomatis agar sync berikutnya bebas captcha.</i>\n\n⏳ <i>Robot menunggu balasan Anda selama 3 menit...</i>');
+                        formData.append('parse_mode', 'HTML');
+                        formData.append('photo', new Blob([screenshotBuf], { type: 'image/png' }), 'captcha.png');
+
+                        await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendPhoto`, {
+                            method: 'POST',
+                            body: formData
+                        });
+                        console.log('📲 Foto screenshot login berhasil dikirim ke Telegram!');
+                    } catch(err) {
+                        console.warn('⚠️ Gagal kirim foto via FormData, mengirim pesan teks:', err.message);
+                        await sendTelegram('📸 <b>RHFX Sync: Butuh Kode CAPTCHA 4 Angka!</b>\n\nBuka Valetax di browser, lihat kode captchanya, lalu <b>balas pesan ini dengan 4 angka</b> tersebut!\n⏳ Robot menunggu 3 menit...');
+                    }
+
+                    let lastUpdateId = 0;
+                    try {
+                        const initRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?limit=1&offset=-1`);
+                        const initData = await initRes.json();
+                        if (initData.ok && initData.result.length > 0) {
+                            lastUpdateId = initData.result[initData.result.length - 1].update_id;
                         }
                     } catch(e) {}
 
-                    if (captchaCode) break;
-                    if ((attempt + 1) % 5 === 0) {
-                        console.log(`⏳ Masih menunggu balasan Telegram... (${(attempt + 1) * 3} detik)`);
-                    }
-                }
+                    let captchaCode = null;
+                    console.log('⏳ Menunggu balasan 4 angka dari Telegram bro (maks 3 menit)...');
 
-                if (!captchaCode) {
-                    throw new Error('Waktu habis (3 menit) belum ada balasan kode captcha dari Telegram! Sync dibatalkan.');
-                }
+                    for (let attempt = 0; attempt < 60; attempt++) {
+                        await new Promise(r => setTimeout(r, 3000));
+                        try {
+                            const updRes = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/getUpdates?offset=${lastUpdateId + 1}&timeout=3`);
+                            const updData = await updRes.json();
+                            if (updData.ok && updData.result.length > 0) {
+                                for (const upd of updData.result) {
+                                    lastUpdateId = upd.update_id;
+                                    const msgText = (upd.message?.text || '').trim();
+                                    if (/^\d{4,6}$/.test(msgText)) {
+                                        captchaCode = msgText;
+                                        console.log(`🎯 KODE CAPTCHA DITERIMA DARI TELEGRAM: ${captchaCode}`);
+                                        break;
+                                    }
+                                }
+                            }
+                        } catch(e) {}
 
-                let captchaField = await page.$('input[name*="captcha" i], input[id*="captcha" i], input[placeholder*="captcha" i], input[placeholder*="kode" i], input[placeholder*="code" i], input[placeholder*="angka" i]');
-                if (!captchaField) {
-                    const allInputs = await page.$$('input:not([type="hidden"]):not([type="password"]):not([type="email"])');
-                    if (allInputs.length > 1) {
-                        captchaField = allInputs[allInputs.length - 1];
-                    } else if (allInputs.length === 1) {
-                        captchaField = allInputs[0];
-                    }
-                }
-
-                if (captchaField) {
-                    await captchaField.click({ clickCount: 3 });
-                    await captchaField.type(captchaCode, { delay: 100 });
-                    console.log(`✍️  Kode captcha ${captchaCode} berhasil diketikkan ke form.`);
-                }
-
-                await sendTelegram(`✅ Kode captcha <b>${captchaCode}</b> diterima! Robot sedang login & menyimpan sesi...`);
-                await new Promise(r => setTimeout(r, 800));
-
-            } else {
-                throw new Error('TELEGRAM_BOT_TOKEN atau TELEGRAM_CHAT_ID belum diset di GitHub Secrets!');
-            }
-
-            // Submit Form Login
-            let loginBtn = null;
-            const loginSelectors = ['button[type="submit"]', 'input[type="submit"]', 'button:not([type])'];
-            for (const sel of loginSelectors) {
-                try {
-                    const els = await page.$$(sel);
-                    for (const el of els) {
-                        const txt = (await page.evaluate(e => e.innerText || e.value || '', el) || '').toLowerCase();
-                        if (txt.includes('login') || txt.includes('masuk') || txt.includes('sign') || txt.includes('submit')) {
-                            loginBtn = el; break;
+                        if (captchaCode) break;
+                        if ((attempt + 1) % 5 === 0) {
+                            console.log(`⏳ Masih menunggu balasan Telegram... (${(attempt + 1) * 3} detik)`);
                         }
                     }
-                    if (loginBtn) break;
-                } catch(e) {}
-            }
-            if (!loginBtn) { await passField.press('Enter'); } else { await loginBtn.click(); console.log('🖱️  Tombol login diklik.'); }
 
-            console.log('⏳ Menunggu verifikasi redirect setelah login...');
-            try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }); } catch(e) {}
-            await new Promise(r => setTimeout(r, 4000));
+                    if (!captchaCode) {
+                        throw new Error('Waktu habis (3 menit) belum ada balasan kode captcha dari Telegram! Sync dibatalkan.');
+                    }
+
+                    captchaField = await getCaptchaInput();
+                    if (!captchaField) {
+                        const allInputs = await page.$$('input:not([type="hidden"]):not([type="password"]):not([type="email"])');
+                        if (allInputs.length > 0) captchaField = allInputs[allInputs.length - 1];
+                    }
+
+                    if (captchaField) {
+                        await captchaField.click({ clickCount: 3 });
+                        await captchaField.type(captchaCode, { delay: 100 });
+                        console.log(`✍️  Kode captcha ${captchaCode} berhasil diketikkan ke form.`);
+                    }
+
+                    await sendTelegram(`✅ Kode captcha <b>${captchaCode}</b> diterima! Robot sedang login & menyimpan sesi...`);
+                    await new Promise(r => setTimeout(r, 800));
+
+                    await findAndClickLoginBtn();
+                    console.log('⏳ Menunggu verifikasi redirect setelah login dengan captcha...');
+                    try { await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }); } catch(e) {}
+                    await new Promise(r => setTimeout(r, 4000));
+                }
+            }
+
             const afterUrl = page.url();
             console.log(`📍 URL setelah login: ${afterUrl}`);
 
