@@ -186,30 +186,84 @@ async function scrapePartnershipSummary(page) {
         await new Promise(r => setTimeout(r, 1200));
 
         const summary = await page.evaluate(() => {
-            const body = document.body.innerText || '';
-            let commissionToday = 0;
-            let volumeLotsToday = 0;
-            let withdrawableBalance = 0;
+            function extractMetricValue(targetLabels) {
+                const labels = Array.isArray(targetLabels) ? targetLabels : [targetLabels];
+                function parseNum(str) {
+                    if (!str || typeof str !== 'string') return null;
+                    let clean = str;
+                    for (const l of labels) {
+                        clean = clean.replace(new RegExp(l, 'gi'), '');
+                    }
+                    const m = clean.match(/[\$€£]?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)/);
+                    if (m && m[1]) {
+                        const val = parseFloat(m[1].replace(/,/g, ''));
+                        if (!isNaN(val)) return val;
+                    }
+                    return null;
+                }
 
-            // 1. Komisi yang Diperoleh
-            const mComm = body.match(/\$\s*([\d,]+\.?\d*)\s*(?:[^\n]*\n)*?\s*Komisi yang Diperoleh/i)
-                       || body.match(/Komisi yang Diperoleh\s*(?:[^\n]*\n)*?\s*\$?\s*([\d,]+\.?\d*)/i);
-            if (mComm) commissionToday = parseFloat(mComm[1].replace(/,/g, '')) || 0;
+                // 1. DOM Traversal terdekat
+                const allEls = Array.from(document.querySelectorAll('*'));
+                for (const el of allEls) {
+                    if (el.children.length > 2) continue;
+                    const text = (el.textContent || '').trim();
+                    if (!text || text.length > 60) continue;
 
-            // 2. Volume yang Diperdagangkan
-            const mVol = body.match(/([\d,]+\.?\d*)\s*Lot\s*(?:[^\n]*\n)*?\s*Volume yang Diperdagangkan/i)
-                      || body.match(/Volume yang Diperdagangkan\s*(?:[^\n]*\n)*?\s*([\d,]+\.?\d*)\s*Lot?/i);
-            if (mVol) volumeLotsToday = parseFloat(mVol[1].replace(/,/g, '')) || 0;
+                    const matched = labels.some(lbl => {
+                        const low = text.toLowerCase();
+                        return low === lbl.toLowerCase() || low === lbl.toLowerCase() + ':';
+                    });
 
-            // 3. Tersedia untuk Penarikan
-            const mBal = body.match(/Tersedia untuk Penarikan\s*:\s*\$?\s*([\d,]+\.?\d*)/i)
-                      || body.match(/Available for Withdrawal\s*:\s*\$?\s*([\d,]+\.?\d*)/i);
-            if (mBal) withdrawableBalance = parseFloat(mBal[1].replace(/,/g, '')) || 0;
+                    if (matched) {
+                        let curr = el.parentElement;
+                        for (let depth = 0; depth < 3 && curr; depth++) {
+                            const cText = (curr.innerText || '').trim();
+                            if (cText.length > 0 && cText.length < 250) {
+                                const lines = cText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                                const lIdx = lines.findIndex(l => labels.some(lbl => l.toLowerCase().includes(lbl.toLowerCase())));
+                                if (lIdx !== -1) {
+                                    const valSame = parseNum(lines[lIdx]);
+                                    if (valSame !== null) return valSame;
+                                    if (lIdx > 0) {
+                                        const valPrev = parseNum(lines[lIdx - 1]);
+                                        if (valPrev !== null) return valPrev;
+                                    }
+                                    if (lIdx < lines.length - 1) {
+                                        const valNext = parseNum(lines[lIdx + 1]);
+                                        if (valNext !== null) return valNext;
+                                    }
+                                }
+                            }
+                            curr = curr.parentElement;
+                        }
+                    }
+                }
+
+                // 2. Strict Line-Boundary Fallback dari document.body.innerText
+                const bodyText = document.body.innerText || '';
+                const bodyLines = bodyText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                const bIdx = bodyLines.findIndex(l => labels.some(lbl => l.toLowerCase().includes(lbl.toLowerCase())));
+                if (bIdx !== -1) {
+                    const valSame = parseNum(bodyLines[bIdx]);
+                    if (valSame !== null) return valSame;
+
+                    for (let i = bIdx - 1; i >= Math.max(0, bIdx - 2); i--) {
+                        const valPrev = parseNum(bodyLines[i]);
+                        if (valPrev !== null) return valPrev;
+                    }
+                    for (let i = bIdx + 1; i <= Math.min(bodyLines.length - 1, bIdx + 2); i++) {
+                        const valNext = parseNum(bodyLines[i]);
+                        if (valNext !== null) return valNext;
+                    }
+                }
+
+                return 0;
+            }
 
             return {
-                commission_today: commissionToday,
-                volume_lots_today: volumeLotsToday,
-                withdrawable_balance: withdrawableBalance
+                commission_today: extractMetricValue(['Komisi yang Diperoleh', 'Komisi Diperoleh']),
+                volume_lots_today: extractMetricValue(['Volume yang Diperdagangkan', 'Volume Diperdagangkan']),
+                withdrawable_balance: extractMetricValue(['Tersedia untuk Penarikan', 'Available for Withdrawal'])
             };
         });
 
@@ -235,46 +289,97 @@ async function scrapeClientStats(page, allExtractedRecords) {
         });
 
         const stats = await page.evaluate(() => {
-            const body = document.body.innerText || '';
-            let clientCount = 0;
-            let newClientCount = 0;
-            let totalLotsTraded = 0;
-            let totalLotsPaid = 0;
-            let totalRebates = 0;
-            let totalDeposit = 0;
-            let totalWithdrawal = 0;
+            function extractMetricValue(targetLabels) {
+                const labels = Array.isArray(targetLabels) ? targetLabels : [targetLabels];
+                function parseNum(str) {
+                    if (!str || typeof str !== 'string') return null;
+                    let clean = str;
+                    for (const l of labels) {
+                        clean = clean.replace(new RegExp(l, 'gi'), '');
+                    }
+                    const m = clean.match(/[\$€£]?\s*([0-9]+(?:,[0-9]{3})*(?:\.[0-9]+)?)/);
+                    if (m && m[1]) {
+                        const val = parseFloat(m[1].replace(/,/g, ''));
+                        if (!isNaN(val)) return val;
+                    }
+                    return null;
+                }
 
-            // Jumlah klien & Klien Baru
-            const mCl = body.match(/(\d+)\s+(?:[^\n]*\n)*?\s*Jumlah klien/i)
-                     || body.match(/Jumlah klien\s+(?:[^\n]*\n)*?\s*(\d+)/i);
-            if (mCl) clientCount = parseInt(mCl[1], 10) || 0;
+                // 1. DOM Traversal terdekat
+                const allEls = Array.from(document.querySelectorAll('*'));
+                for (const el of allEls) {
+                    if (el.children.length > 2) continue;
+                    const text = (el.textContent || '').trim();
+                    if (!text || text.length > 60) continue;
 
-            const mNew = body.match(/(\d+)\s+(?:[^\n]*\n)*?\s*Klien Baru/i)
-                      || body.match(/Klien Baru\s+(?:[^\n]*\n)*?\s*(\d+)/i);
-            if (mNew) newClientCount = parseInt(mNew[1], 10) || 0;
+                    const matched = labels.some(lbl => {
+                        const low = text.toLowerCase();
+                        return low === lbl.toLowerCase() || low === lbl.toLowerCase() + ':';
+                    });
 
-            // Total Deposit: "388.80 \n Total Deposit"
-            const mDep = body.match(/([\d,]+\.?\d*)\s+(?:[^\n]*\n)*?\s*Total Deposit/i)
-                      || body.match(/Total Deposit\s+(?:[^\n]*\n)*?\s*([\d,]+\.?\d*)/i);
-            if (mDep) totalDeposit = parseFloat(mDep[1].replace(/,/g, '')) || 0;
+                    if (matched) {
+                        let curr = el.parentElement;
+                        for (let depth = 0; depth < 3 && curr; depth++) {
+                            const cText = (curr.innerText || '').trim();
+                            if (cText.length > 0 && cText.length < 250) {
+                                const lines = cText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                                const lIdx = lines.findIndex(l => labels.some(lbl => l.toLowerCase().includes(lbl.toLowerCase())));
+                                if (lIdx !== -1) {
+                                    const valSame = parseNum(lines[lIdx]);
+                                    if (valSame !== null) return valSame;
+                                    if (lIdx > 0) {
+                                        const valPrev = parseNum(lines[lIdx - 1]);
+                                        if (valPrev !== null) return valPrev;
+                                    }
+                                    if (lIdx < lines.length - 1) {
+                                        const valNext = parseNum(lines[lIdx + 1]);
+                                        if (valNext !== null) return valNext;
+                                    }
+                                }
+                            }
+                            curr = curr.parentElement;
+                        }
+                    }
+                }
 
-            // Total Penarikan: "71.69 \n Total Penarikan"
-            const mWdr = body.match(/([\d,]+\.?\d*)\s+(?:[^\n]*\n)*?\s*Total Penarikan/i)
-                      || body.match(/Total Penarikan\s+(?:[^\n]*\n)*?\s*([\d,]+\.?\d*)/i);
-            if (mWdr) totalWithdrawal = parseFloat(mWdr[1].replace(/,/g, '')) || 0;
+                // 2. Strict Line-Boundary Fallback dari document.body.innerText
+                const bodyText = document.body.innerText || '';
+                const bodyLines = bodyText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+                const bIdx = bodyLines.findIndex(l => labels.some(lbl => l.toLowerCase().includes(lbl.toLowerCase())));
+                if (bIdx !== -1) {
+                    const valSame = parseNum(bodyLines[bIdx]);
+                    if (valSame !== null) return valSame;
 
-            // Total Rabat: "53.5326 \n Total Rabat"
-            const mReb = body.match(/([\d,]+\.?\d*)\s+(?:[^\n]*\n)*?\s*Total Rabat/i)
-                      || body.match(/Total Rabat\s+(?:[^\n]*\n)*?\s*([\d,]+\.?\d*)/i);
-            if (mReb) totalRebates = parseFloat(mReb[1].replace(/,/g, '')) || 0;
+                    for (let i = bIdx - 1; i >= Math.max(0, bIdx - 2); i--) {
+                        const valPrev = parseNum(bodyLines[i]);
+                        if (valPrev !== null) return valPrev;
+                    }
+                    for (let i = bIdx + 1; i <= Math.min(bodyLines.length - 1, bIdx + 2); i++) {
+                        const valNext = parseNum(bodyLines[i]);
+                        if (valNext !== null) return valNext;
+                    }
+                }
+
+                return 0;
+            }
+
+            const dep = extractMetricValue(['Total Deposit', 'Deposit']);
+            const wdr = extractMetricValue(['Total Penarikan', 'Penarikan']);
+            const reb = extractMetricValue(['Total Rabat', 'Rabat']);
+            const lotPaid = extractMetricValue(['Total Lot Dibayar', 'Lot Dibayar']);
+            const lotTraded = extractMetricValue(['Total Lot Diperdagangkan']);
+            const clCount = extractMetricValue(['Jumlah klien']);
+            const newClCount = extractMetricValue(['Klien Baru']);
 
             return {
-                client_count: clientCount,
-                new_client_count: newClientCount,
-                total_deposit: totalDeposit,
-                total_withdrawal: totalWithdrawal,
-                total_rebates: totalRebates,
-                page_text: body
+                total_deposit: dep,
+                total_withdrawal: wdr,
+                total_rebates: reb,
+                total_lots_paid: lotPaid,
+                total_lots_traded: lotTraded,
+                client_count: clCount,
+                new_client_count: newClCount,
+                page_text: document.body.innerText || ''
             };
         });
 
@@ -289,14 +394,15 @@ async function scrapeClientStats(page, allExtractedRecords) {
             });
         }
 
-        console.log(`  👥 Jumlah Klien    : ${stats.client_count} (${stats.new_client_count} Klien Baru)`);
-        console.log(`  📥 Total Deposit   : $${stats.total_deposit}`);
-        console.log(`  📤 Total Penarikan : $${stats.total_withdrawal}`);
+        console.log(`  📥 Total Deposit    : $${stats.total_deposit}`);
+        console.log(`  📤 Total Penarikan  : $${stats.total_withdrawal}`);
+        console.log(`  💎 Total Rabat      : $${stats.total_rebates}`);
+        console.log(`  📊 Total Lot Dibayar: ${stats.total_lots_paid}`);
 
         return stats;
     } catch (err) {
         console.warn('⚠️ Gagal membaca halaman statistik klien:', err.message);
-        return { client_count: 0, new_client_count: 0, total_deposit: 0, total_withdrawal: 0, total_rebates: 0 };
+        return { client_count: 0, new_client_count: 0, total_deposit: 0, total_withdrawal: 0, total_rebates: 0, total_lots_paid: 0, total_lots_traded: 0 };
     }
 }
 
@@ -943,14 +1049,28 @@ async function runClientSync() {
         const eligibleMembers = allMembers.filter(m => (m.equity || 0) >= 5);
         const lowEquityMembers = allMembers.filter(m => (m.equity || 0) < 5);
 
+        // Fail-safe synergy:
+        // Jika komisi dari summary kosong/0, gunakan Total Rabat dari clientStats (nilainya identik)
+        const finalCommission = (summaryData.commission_today && summaryData.commission_today > 0)
+            ? summaryData.commission_today
+            : (clientStats.total_rebates || 0);
+
+        const finalVolume = (summaryData.volume_lots_today && summaryData.volume_lots_today > 0)
+            ? summaryData.volume_lots_today
+            : (clientStats.total_lots_paid || 0);
+
+        const finalWithdrawable = summaryData.withdrawable_balance || 0;
+        const finalDeposit = clientStats.total_deposit || 0;
+        const finalWithdrawal = clientStats.total_withdrawal || 0;
+
         const commissionSummary = {
-            commission_today: summaryData.commission_today || 0,
-            volume_lots_today: summaryData.volume_lots_today || 0,
-            withdrawable_balance: summaryData.withdrawable_balance || 0,
+            commission_today: finalCommission,
+            volume_lots_today: finalVolume,
+            withdrawable_balance: finalWithdrawable,
             client_count: clientStats.client_count || 0,
             new_client_count: clientStats.new_client_count || 0,
-            total_deposit: clientStats.total_deposit || 0,
-            total_withdrawal: clientStats.total_withdrawal || 0
+            total_deposit: finalDeposit,
+            total_withdrawal: finalWithdrawal
         };
 
         // Kirim final sync dengan seluruh member terkumpul untuk deteksi real-time keluar IB
@@ -990,6 +1110,8 @@ async function runClientSync() {
         console.log(`💵 Komisi Diperoleh Hari Ini: $${commissionSummary.commission_today}`);
         console.log(`📊 Volume Trading Hari Ini: ${commissionSummary.volume_lots_today} Lot`);
         console.log(`💼 Saldo Siap Tarik: $${commissionSummary.withdrawable_balance}`);
+        console.log(`📥 Total Deposit: $${commissionSummary.total_deposit}`);
+        console.log(`📤 Total Penarikan: $${commissionSummary.total_withdrawal}`);
         console.log(`✨ Member Lolos VIP (Equity ≥ $5): ${eligibleMembers.length}`);
         console.log(`⏳ Member Belum Memenuhi (< $5): ${lowEquityMembers.length}`);
         console.log(`🚪 Member Terdeteksi Keluar IB: ${removedDetectedCount}`);
@@ -1008,13 +1130,11 @@ async function runClientSync() {
             eligibleListText = '\n\n⚠️ <i>Belum ada member dengan equity ≥ $5.</i>';
         }
 
-        const commStr = summaryData.commission_today > 0 ? Number(summaryData.commission_today).toFixed(4) : '0.0000';
-        const volStr = summaryData.volume_lots_today > 0 ? Number(summaryData.volume_lots_today).toFixed(4) : '0.0000';
-        const balStr = summaryData.withdrawable_balance > 0 ? Number(summaryData.withdrawable_balance).toFixed(4) : '0.0000';
-        const depStr = Number(clientStats.total_deposit || 0).toFixed(2);
-        const wdrStr = Number(clientStats.total_withdrawal || 0).toFixed(2);
-        const clientCountVal = clientStats.client_count > 0 ? clientStats.client_count : allMembers.length;
-        const newClientSuffix = clientStats.new_client_count > 0 ? ` (${clientStats.new_client_count} Klien Baru)` : '';
+        const commStr = finalCommission > 0 ? Number(finalCommission).toFixed(4) : '0.0000';
+        const volStr = finalVolume > 0 ? Number(finalVolume).toFixed(4) : '0.0000';
+        const balStr = finalWithdrawable > 0 ? Number(finalWithdrawable).toFixed(4) : '0.0000';
+        const depStr = Number(finalDeposit).toFixed(2);
+        const wdrStr = Number(finalWithdrawal).toFixed(2);
 
         if (allMembers.length > 0) {
             await sendTelegram(
@@ -1022,8 +1142,7 @@ async function runClientSync() {
                 `📊 <b>IKHTISAR UTAMA:</b>\n` +
                 `💵 Komisi Hari Ini  : <b>$${commStr}</b>\n` +
                 `🗄️ Total Database   : <b>${grandSynced} Client (${durationSec} dtk)</b>\n` +
-                `✨ Lolos VIP (≥ $5) : <b>${eligibleMembers.length} Member</b>\n` +
-                `👥 Jumlah Klien     : <b>${clientCountVal} Klien${newClientSuffix}</b>\n\n` +
+                `✨ Lolos VIP (≥ $5) : <b>${eligibleMembers.length} Member</b>\n\n` +
                 `💰 <b>FINANSIAL & TRADING:</b>\n` +
                 `📊 Volume Trading   : <b>${volStr} Lot</b>\n` +
                 `💼 Saldo Siap Tarik : <b>$${balStr}</b>\n` +
